@@ -4,7 +4,7 @@ import Combine
 
 /// The infinite canvas: draws every card of the current canvas with Core Graphics,
 /// handles pan/zoom, selection, card dragging, keyboard navigation and in-place editing.
-final class CanvasView: NSView, NSTextFieldDelegate {
+final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     let state: AppState
     private var cancellables = Set<AnyCancellable>()
     private var layouts: [Layout.CardLayout] = []
@@ -299,6 +299,20 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             return
         }
         super.keyDown(with: event)
+    }
+
+    // MARK: Clipboard (Edit menu and ⌘C / ⌘X / ⌘V arrive here through the responder chain)
+
+    @objc func copy(_ sender: Any?) { state.copySelection() }
+    @objc func cut(_ sender: Any?) { state.cutSelection() }
+    @objc func paste(_ sender: Any?) { state.paste() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(copy(_:)), #selector(cut(_:)): return state.canCopy
+        case #selector(paste(_:)): return state.canPaste()
+        default: return true
+        }
     }
 
     // MARK: In-place editing

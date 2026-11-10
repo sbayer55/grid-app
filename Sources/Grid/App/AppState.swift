@@ -81,17 +81,19 @@ final class AppState: ObservableObject {
         guard workbook != before else { return }
         dirty = true
         undoManager.registerUndo(withTarget: self) { target in
-            Task { @MainActor in target.restore(before, name: name) }
+            MainActor.assumeIsolated { target.restore(before, name: name) }
         }
         undoManager.setActionName(name)
     }
 
+    /// Runs inside `undo()` / `redo()` (always on the main thread), so the inverse registered
+    /// here lands on the opposite stack. Hopping through a Task would make it a fresh undo.
     private func restore(_ wb: Workbook, name: String) {
         let current = workbook
         workbook = wb
         dirty = true
         undoManager.registerUndo(withTarget: self) { target in
-            Task { @MainActor in target.restore(current, name: name) }
+            MainActor.assumeIsolated { target.restore(current, name: name) }
         }
         undoManager.setActionName(name)
         clampSelection()
@@ -170,14 +172,75 @@ final class AppState: ObservableObject {
         updateSheet(sheet.id, "Edit Cell") { s in s.rows[r][col] = value }
     }
 
-    func clearSelection() {
+    func clearSelection(actionName: String = "Clear Cells") {
         guard let s = selection, let sheet = sheet(for: s.cardID) else { return }
         let rows = workbook.visibleRows(of: sheet)
-        updateSheet(sheet.id, "Clear Cells") { sh in
+        updateSheet(sheet.id, actionName) { sh in
             for r in s.minRow...s.maxRow where rows.indices.contains(r) {
                 for c in s.minCol...s.maxCol where c < sh.columns.count { sh.rows[rows[r].sourceIndex][c] = .empty }
             }
         }
+    }
+
+    // MARK: Clipboard
+
+    /// Grid's own pasteboard type: a JSON `CellClip` with raw values and formulas.
+    static let cellsPasteboardType = NSPasteboard.PasteboardType("app.grid.cells")
+    static let csvPasteboardType = NSPasteboard.PasteboardType("public.comma-separated-values-text")
+
+    /// The selection, when it sits on a sheet card (view cards have nothing to copy).
+    private var gridSelection: (selection: Selection, sheet: Sheet)? {
+        guard let s = selection, let card = canvas.cards.first(where: { $0.id == s.cardID }), card.kind.isGrid,
+              let sheet = sheet(for: s.cardID) else { return nil }
+        return (s, sheet)
+    }
+    var canCopy: Bool { gridSelection != nil }
+
+    func canPaste(from pasteboard: NSPasteboard = .general) -> Bool {
+        gridSelection != nil && pasteboard.availableType(from: [AppState.cellsPasteboardType, AppState.csvPasteboardType, .string]) != nil
+    }
+
+    /// Writes the selection as Grid cells, CSV and tab-separated plain text.
+    @discardableResult
+    func copySelection(to pasteboard: NSPasteboard = .general, cut: Bool = false) -> Bool {
+        guard let (s, sheet) = gridSelection,
+              var clip = workbook.clip(sheetID: sheet.id, rows: s.minRow...s.maxRow, cols: s.minCol...s.maxCol) else { return false }
+        clip.isCut = cut
+        pasteboard.clearContents()
+        if let data = try? JSONEncoder().encode(clip) { pasteboard.setData(data, forType: AppState.cellsPasteboardType) }
+        pasteboard.setString(Delimited.encode(clip.texts, delimiter: ","), forType: AppState.csvPasteboardType)
+        pasteboard.setString(Delimited.encode(clip.texts, delimiter: "\t"), forType: .string)
+        show("\(cut ? "cut" : "copied") \(clip.rowCount)×\(clip.colCount)")
+        return true
+    }
+
+    func cutSelection(to pasteboard: NSPasteboard = .general) {
+        guard copySelection(to: pasteboard, cut: true) else { return }
+        clearSelection(actionName: "Cut")
+    }
+
+    /// What a paste would insert: Grid's own cells if present, else CSV, else sniffed plain text.
+    static func pasteContent(from pasteboard: NSPasteboard) -> PasteContent? {
+        if let data = pasteboard.data(forType: cellsPasteboardType), let clip = try? JSONDecoder().decode(CellClip.self, from: data) {
+            return .clip(clip)
+        }
+        if let csv = pasteboard.string(forType: csvPasteboardType), !csv.isEmpty { return .text(Delimited.decode(csv, delimiter: ",")) }
+        if let text = pasteboard.string(forType: .string), !text.isEmpty { return .text(Delimited.sniff(text)) }
+        return nil
+    }
+
+    func paste(from pasteboard: NSPasteboard = .general) {
+        guard let (s, sheet) = gridSelection, let content = AppState.pasteContent(from: pasteboard) else { return }
+        var pasted: CellRange?
+        mutate("Paste") { wb in
+            pasted = wb.paste(content, sheetID: sheet.id, displayRow: s.minRow, col: s.minCol,
+                              fillRows: s.maxRow - s.minRow + 1, fillCols: s.maxCol - s.minCol + 1)
+        }
+        guard let r = pasted else { return }
+        selection = Selection(cardID: s.cardID, anchor: CellRef(row: r.rows.lowerBound, col: r.cols.lowerBound),
+                              focus: CellRef(row: r.rows.upperBound, col: r.cols.upperBound))
+        clampSelection()
+        show("pasted \(r.rows.count)×\(r.cols.count)")
     }
 
     func appendRow() {

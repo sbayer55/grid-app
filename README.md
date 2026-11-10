@@ -13,7 +13,7 @@ Requires macOS 14+ and Xcode 15+ (Swift 5.9).
 ```sh
 swift build            # debug build
 swift run Grid         # run from the package (window appears, no .app bundle)
-swift test             # formula engine, pivot/chart, xlsx round-trip
+swift test             # formula engine, pivot/chart, xlsx round-trip, clipboard
 make app               # release build → build/Grid.app (ad-hoc signed)
 make dmg               # build/Grid-<version>.dmg with an /Applications shortcut
 make icon              # redraw Resources/AppIcon.icns from Scripts/make-icon.swift
@@ -50,7 +50,7 @@ view-config card — these sit in the viewport and never pan or scale.
 ## What it does
 
 - **Canvases** — tabs `1 · Orders`, `2 · Inventory`, … (⌘1-9, ⌘T new, double-click to rename). Each holds one sheet card and any number of view cards. Drag empty canvas to pan, ⌘+scroll or pinch to zoom, ⌘0 fits everything.
-- **Grid** — bounded to the data; `+ row` / `+ column` at the edges (⌘⇧↩ appends a row). Click / drag / ⇧-click to select, arrows and Tab to move, type to edit, ↩ commits, ⌫ clears. Column header click opens the column menu.
+- **Grid** — bounded to the data; `+ row` / `+ column` at the edges (⌘⇧↩ appends a row). Click / drag / ⇧-click to select, arrows and Tab to move, type to edit, ↩ commits, ⌫ clears. ⌘C / ⌘X / ⌘V copy, cut and paste: within Grid formulas keep their relative references (`$` anchors hold); other apps get tab-separated text and CSV, and both paste back in. A paste past the edge grows the sheet. Column header click opens the column menu.
 - **Column menu** — sort (multi-key, numbered badges), pin columns, filter by values, type (text / number / currency / percent / date / check), alignment, decimals, fit width, color by value. That is the whole formatting surface.
 - **Formulas** — `=D7*E7`, `=SUM(F:F)`, `=IF(G2>0.4,"high","low")`, `=Orders!F2`, `='Other Sheet'!A1:A9`. Functions: SUM AVERAGE COUNT COUNTA MIN MAX ABS ROUND IF AND OR NOT LEN CONCAT. A column can carry a `formulaTemplate` so new rows get the formula automatically (Revenue does).
 - **Views** — select a range, then ⌘⇧P (pivot) or ⌘⇧C (chart). Click a view's header to open its floating config card: rows × columns × value × aggregation, totals, sort-by-value; chart type (bar / column / stacked), x / y / series. Views recompute live as cells change and respect the sheet filter.

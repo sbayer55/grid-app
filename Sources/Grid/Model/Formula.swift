@@ -173,6 +173,7 @@ fileprivate struct Lexer {
             }
             i += 1
             switch c {
+            case "#": throw FormulaError.ref   // `#REF!` left behind by a paste that ran off the sheet
             case "(": out.append(.lparen)
             case ")": out.append(.rparen)
             case ",": out.append(.comma)
@@ -470,5 +471,68 @@ extension Array {
             if less(b.element, a.element) { return false }
             return a.offset < b.offset
         }.map { $0.element }
+    }
+}
+
+// MARK: - Reference shifting (copy / paste)
+
+enum Formula {
+    /// Rewrites a formula as if its cell had moved by `dRow` rows and `dCol` columns: relative
+    /// references follow, `$`-anchored parts stay, whole-column ranges (`F:F`) shift by column
+    /// only. A reference pushed off the sheet becomes `#REF!`. Strings, function names and
+    /// sheet qualifiers are left alone.
+    static func shifted(_ formula: String, dRow: Int, dCol: Int) -> String {
+        if dRow == 0 && dCol == 0 { return formula }
+        let chars = Array(formula)
+        var out = ""
+        var i = 0
+        /// Last non-space character emitted and next non-space character ahead.
+        func previous() -> Character? { out.last { !$0.isWhitespace } }
+        func upcoming(_ from: Int) -> Character? { chars[from...].first { !$0.isWhitespace } }
+
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\"" || c == "'" {                       // string literal or quoted sheet name
+                out.append(c); i += 1
+                while i < chars.count, chars[i] != c { out.append(chars[i]); i += 1 }
+                if i < chars.count { out.append(c); i += 1 }
+                continue
+            }
+            if c.isNumber || c == "." {                      // numeric literal
+                while i < chars.count, chars[i].isNumber || chars[i] == "." { out.append(chars[i]); i += 1 }
+                continue
+            }
+            guard c.isLetter || c == "_" || c == "$" else { out.append(c); i += 1; continue }
+            var word = ""
+            while i < chars.count, chars[i].isLetter || chars[i].isNumber || chars[i] == "_" || chars[i] == "$" || chars[i] == "." { word.append(chars[i]); i += 1 }
+            let next = upcoming(i)
+            if next == "(" || next == "!" { out += word; continue }       // function or sheet name
+            let inRange = next == ":" || previous() == ":"
+            out += shiftedReference(word, dRow: dRow, dCol: dCol, allowColumn: inRange) ?? word
+        }
+        return out
+    }
+
+    /// `A1`, `$A1`, `A$1`, `$A$1`, and (inside a range) `A` / `$A`. Nil when `word` is not a reference.
+    private static func shiftedReference(_ word: String, dRow: Int, dCol: Int, allowColumn: Bool) -> String? {
+        var rest = Substring(word)
+        let colFixed = rest.hasPrefix("$")
+        if colFixed { rest.removeFirst() }
+        let letters = rest.prefix { $0.isLetter && $0.isASCII }
+        rest = rest.dropFirst(letters.count)
+        guard (1...3).contains(letters.count), var col = Sheet.columnIndex(fromLetters: letters.uppercased()) else { return nil }
+        let rowFixed = rest.hasPrefix("$")
+        if rowFixed { rest.removeFirst() }
+
+        if rest.isEmpty {                                   // column-only, e.g. the halves of F:F
+            guard allowColumn, !rowFixed else { return nil }
+            if !colFixed { col += dCol }
+            return col < 0 ? "#REF!" : (colFixed ? "$" : "") + Sheet.columnLetter(col)
+        }
+        guard rest.allSatisfy({ $0.isASCII && $0.isNumber }), var row = Int(rest), row >= 1 else { return nil }
+        if !colFixed { col += dCol }
+        if !rowFixed { row += dRow }
+        guard col >= 0, row >= 1 else { return "#REF!" }
+        return (colFixed ? "$" : "") + Sheet.columnLetter(col) + (rowFixed ? "$" : "") + String(row)
     }
 }
