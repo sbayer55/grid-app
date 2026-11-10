@@ -6,11 +6,13 @@ struct TabBarView: View {
     @EnvironmentObject var state: AppState
     @State private var renaming: Int? = nil
     @State private var renameText = ""
+    /// Matches the unified-compact title bar so the tabs sit on the traffic-light row.
+    static let height: CGFloat = 38
 
     var body: some View {
         let theme = state.theme
         HStack(spacing: 8) {
-            Spacer().frame(width: 70)
+            Spacer().frame(width: 64)
             ForEach(Array(state.workbook.canvases.enumerated()), id: \.element.id) { i, canvas in
                 if renaming == i {
                     TextField("name", text: $renameText, onCommit: { state.renameCanvas(i, to: renameText); renaming = nil })
@@ -77,7 +79,7 @@ struct TabBarView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
-        .frame(height: 42)
+        .frame(height: TabBarView.height)
         .animation(.easeOut(duration: 0.2), value: state.canvasIndex)
     }
 

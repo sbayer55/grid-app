@@ -20,6 +20,7 @@ struct ContentView: View {
                 Rectangle().fill(theme.text.swiftUI.opacity(0.08)).frame(height: 1)
                 StatusBarView()
             }
+            .ignoresSafeArea(.container, edges: .top)   // tabs share the title bar row with the traffic lights
 
             if state.paletteOpen {
                 CommandPaletteView()
@@ -127,7 +128,14 @@ struct WindowConfigurator: NSViewRepresentable {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.isMovableByWindowBackground = false
-        w.toolbar = nil
+        // An empty compact toolbar makes the title bar as tall as the tab row, so the traffic lights centre on it.
+        if w.toolbar == nil {
+            let toolbar = NSToolbar(identifier: "grid.titlebar")
+            toolbar.showsBaselineSeparator = false
+            w.toolbar = toolbar
+        }
+        w.toolbarStyle = .unifiedCompact
+        w.titlebarSeparatorStyle = .none
         w.appearance = NSAppearance(named: .darkAqua)
     }
 }
