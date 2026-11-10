@@ -57,9 +57,6 @@ struct ContentView: View {
             ZoomControls()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(16)
-            HintStrip()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .padding(16)
             if let toast = state.toast {
                 ToastView(text: toast.text)
                     .id(toast.id)
@@ -164,34 +161,6 @@ struct ZoomControls: View {
             .background(Capsule().fill(theme.mantle.swiftUI.opacity(0.9)))
             .overlay(Capsule().stroke(theme.lavender.swiftUI.opacity(0.22), lineWidth: 1))
         }
-    }
-}
-
-struct HintStrip: View {
-    @EnvironmentObject var state: AppState
-    var body: some View {
-        // Drop hints from the right as the window narrows, so the strip never runs under the zoom controls.
-        ViewThatFits(in: .horizontal) {
-            strip(4); strip(3); strip(2); strip(1)
-        }
-        .padding(.trailing, 190)   // room for ZoomControls in the opposite corner
-        .font(Theme.uiFont(11))
-        .foregroundStyle(state.theme.subtext.swiftUI)
-        .allowsHitTesting(false)
-    }
-
-    private func strip(_ count: Int) -> some View {
-        HStack(spacing: 14) {
-            HStack(spacing: 4) { Text("drag empty canvas to pan ·"); KeyCap("⌘"); Text("+ scroll zooms") }
-            if count > 1 { Text("click a cell, drag to select") }
-            if count > 2 { Text("double-click to edit") }
-            if count > 3 { Text("click a column letter for sort / pin / type") }
-        }
-        .lineLimit(1)
-        .fixedSize()
-        .padding(.horizontal, 12).frame(height: 26)
-        .background(Capsule().fill(state.theme.mantle.swiftUI.opacity(0.97)))
-        .overlay(Capsule().stroke(state.theme.lavender.swiftUI.opacity(0.22), lineWidth: 1))
     }
 }
 
