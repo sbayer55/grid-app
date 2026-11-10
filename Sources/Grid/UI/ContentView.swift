@@ -1,0 +1,265 @@
+import SwiftUI
+import AppKit
+
+struct ContentView: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        let theme = state.theme
+        ZStack {
+            WindowBackground(theme: theme)
+
+            VStack(spacing: 0) {
+                TabBarView()
+                Rectangle().fill(theme.text.swiftUI.opacity(0.08)).frame(height: 1)
+                ZStack(alignment: .topLeading) {
+                    CanvasRepresentable(state: state)
+                    overlays
+                }
+                .clipped()
+                Rectangle().fill(theme.text.swiftUI.opacity(0.08)).frame(height: 1)
+                StatusBarView()
+            }
+
+            if state.paletteOpen {
+                CommandPaletteView()
+                    .transition(.opacity)
+                    .zIndex(50)
+            }
+        }
+        .overlay(WindowRing(theme: theme).allowsHitTesting(false))
+        .background(WindowConfigurator(title: state.title + (state.dirty ? " — edited" : "")))
+        .foregroundStyle(theme.text.swiftUI)
+        .font(Theme.uiFont(12))
+        .animation(.easeOut(duration: 0.18), value: state.paletteOpen)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.selectedCardID)
+        .animation(.easeOut(duration: 0.16), value: state.columnMenu)
+        .preferredColorScheme(.dark)
+    }
+
+    private var overlays: some View {
+        ZStack(alignment: .topLeading) {
+            if let m = state.columnMenu {
+                ColumnMenuView(menu: m)
+                    .padding(.leading, max(8, min(m.anchor.x, state.viewportSize.width - 266)))
+                    .padding(.top, max(8, min(m.anchor.y, state.viewportSize.height - 420)))
+                    .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .topLeading)))
+                    .zIndex(20)
+            }
+            if let card = state.selectedCard {
+                ViewPanelView(card: card)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(16)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(25)
+            }
+            ZoomControls()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(16)
+            HintStrip()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(16)
+            if let toast = state.toast {
+                ToastView(text: toast.text)
+                    .id(toast.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 52)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .zIndex(30)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: state.toast)
+    }
+}
+
+// MARK: - Window chrome
+
+struct WindowBackground: View {
+    let theme: Theme
+    var body: some View {
+        ZStack {
+            if theme.blur { VisualEffectView(material: .hudWindow) }
+            theme.base.swiftUI.opacity(theme.blur ? theme.windowOpacity : 1)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+struct WindowRing: View {
+    let theme: Theme
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: !theme.animateBorders)) { ctx in
+            let angle = theme.animateBorders ? ctx.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 7) / 7 * 360 : 45
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(AngularGradient(colors: theme.borderGradient.map { $0.swiftUI }, center: .center, angle: .degrees(angle)), lineWidth: 2)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+struct VisualEffectView: NSViewRepresentable {
+    var material: NSVisualEffectView.Material
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = .behindWindow
+        v.state = .active
+        return v
+    }
+    func updateNSView(_ v: NSVisualEffectView, context: Context) { v.material = material }
+}
+
+/// Makes the hosting window transparent with a hidden, full-size title bar.
+struct WindowConfigurator: NSViewRepresentable {
+    var title: String
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { configure(v.window) }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) { DispatchQueue.main.async { configure(v.window) } }
+    private func configure(_ window: NSWindow?) {
+        guard let w = window else { return }
+        w.title = title
+        w.titleVisibility = .hidden
+        w.titlebarAppearsTransparent = true
+        w.styleMask.insert(.fullSizeContentView)
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.isMovableByWindowBackground = false
+        w.toolbar = nil
+        w.appearance = NSAppearance(named: .darkAqua)
+    }
+}
+
+// MARK: - Small overlay pieces
+
+struct ZoomControls: View {
+    @EnvironmentObject var state: AppState
+    var body: some View {
+        let theme = state.theme
+        HStack(spacing: 6) {
+            Button { state.fit() } label: {
+                HStack(spacing: 8) { Text("fit"); KeyCap("⌘0") }
+            }
+            .buttonStyle(ChipStyle(theme: theme))
+            HStack(spacing: 0) {
+                Button { state.zoom(to: state.canvas.zoom / 1.2) } label: { Image(systemName: "minus").frame(width: 28, height: 26) }
+                    .buttonStyle(.plain)
+                Text("\(Int((state.canvas.zoom * 100).rounded()))%")
+                    .font(Theme.uiFont(11, weight: .semibold)).frame(width: 46)
+                Button { state.zoom(to: state.canvas.zoom * 1.2) } label: { Image(systemName: "plus").frame(width: 28, height: 26) }
+                    .buttonStyle(.plain)
+            }
+            .background(Capsule().fill(theme.mantle.swiftUI.opacity(0.9)))
+            .overlay(Capsule().stroke(theme.lavender.swiftUI.opacity(0.22), lineWidth: 1))
+        }
+    }
+}
+
+struct HintStrip: View {
+    @EnvironmentObject var state: AppState
+    var body: some View {
+        HStack(spacing: 14) {
+            HStack(spacing: 4) { Text("drag empty canvas to pan ·"); KeyCap("⌘"); Text("+ scroll zooms") }
+            Text("click a cell, drag to select")
+            Text("double-click to edit")
+            Text("click a column letter for sort / pin / type")
+        }
+        .font(Theme.uiFont(11))
+        .foregroundStyle(state.theme.subtext.swiftUI)
+        .allowsHitTesting(false)
+    }
+}
+
+struct ToastView: View {
+    @EnvironmentObject var state: AppState
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(Theme.uiFont(11.5))
+            .foregroundStyle(state.theme.bright.swiftUI)
+            .padding(.horizontal, 14).padding(.vertical, 7)
+            .background(Capsule().fill(state.theme.mantle.swiftUI.opacity(0.96)))
+            .overlay(Capsule().stroke(state.theme.accent.swiftUI.opacity(0.45), lineWidth: 1))
+    }
+}
+
+struct KeyCap: View {
+    @EnvironmentObject var state: AppState
+    let text: String
+    var dark = false
+    init(_ text: String, dark: Bool = false) { self.text = text; self.dark = dark }
+    var body: some View {
+        Text(text)
+            .font(Theme.uiFont(10, weight: .semibold))
+            .foregroundStyle(dark ? state.theme.crust.swiftUI : state.theme.text.swiftUI)
+            .padding(.horizontal, 6)
+            .frame(minWidth: 18, minHeight: 18)
+            .background(RoundedRectangle(cornerRadius: 6).fill(dark ? state.theme.crust.swiftUI.opacity(0.2) : state.theme.surface1.swiftUI.opacity(0.8)))
+    }
+}
+
+/// Pill button used for chips (run ⌘K, fit, pivot/chart/filter).
+struct ChipStyle: ButtonStyle {
+    var theme: Theme
+    var accent = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Theme.uiFont(11, weight: accent ? .bold : .semibold))
+            .foregroundStyle(accent ? theme.crust.swiftUI : theme.text.swiftUI)
+            .padding(.leading, 10).padding(.trailing, 4)
+            .frame(height: 26)
+            .background(Capsule().fill(accent ? theme.accent.swiftUI : theme.mantle.swiftUI.opacity(0.96)))
+            .overlay(Capsule().stroke(accent ? Color.clear : theme.text.swiftUI.opacity(0.2), lineWidth: 1))
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .contentShape(Capsule())
+    }
+}
+
+/// Small rounded toggle-ish button used in menus and the panel.
+struct ToolButtonStyle: ButtonStyle {
+    var theme: Theme
+    var on = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Theme.uiFont(11, weight: .semibold))
+            .foregroundStyle(on ? theme.bright.swiftUI : theme.text.swiftUI)
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .background(RoundedRectangle(cornerRadius: 7).fill(on ? theme.accent.swiftUI.opacity(0.18) : theme.surface0.swiftUI.opacity(0.6)))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(on ? theme.accent.swiftUI : theme.text.swiftUI.opacity(0.12), lineWidth: 1))
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+/// Floating card chrome: rounded, gradient ring, blurred dark body.
+struct FloatingCard<Content: View>: View {
+    @EnvironmentObject var state: AppState
+    let width: CGFloat
+    @ViewBuilder let content: Content
+    var body: some View {
+        let theme = state.theme
+        content
+            .frame(width: width)
+            .background(RoundedRectangle(cornerRadius: 13).fill(theme.mantle.swiftUI.opacity(0.94)))
+            .background(VisualEffectView(material: .hudWindow).clipShape(RoundedRectangle(cornerRadius: 13)))
+            .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(LinearGradient(colors: [theme.accent.swiftUI, theme.blue.swiftUI, theme.teal.swiftUI], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.5), radius: 24, y: 14)
+            .shadow(color: theme.accent.swiftUI.opacity(0.18), radius: 20)
+    }
+}
+
+struct SectionLabel: View {
+    @EnvironmentObject var state: AppState
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text.uppercased())
+            .font(Theme.uiFont(10, weight: .bold))
+            .tracking(1)
+            .foregroundStyle(state.theme.subtext.swiftUI)
+            .padding(.top, 10).padding(.bottom, 4)
+    }
+}
