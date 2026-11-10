@@ -507,3 +507,411 @@ final class ClipboardAppStateTests: XCTestCase {
         XCTAssertEqual(pb.string(forType: .string), "x")   // a failed copy leaves the pasteboard alone
     }
 }
+
+final class StructureFormulaTests: XCTestCase {
+    private func rows(_ f: String, _ rows: Set<Int>, own: Bool = true) -> String {
+        Formula.adjusted(f, for: .deleteRows(rows), sheetName: "Orders", inEditedSheet: own)
+    }
+    private func cols(_ f: String, _ cols: Set<Int>, own: Bool = true) -> String {
+        Formula.adjusted(f, for: .deleteColumns(cols), sheetName: "Orders", inEditedSheet: own)
+    }
+
+    func testRowDeleteShiftsAndBreaksReferences() {
+        XCTAssertEqual(rows("=D2*E9", [5]), "=D2*E8")
+        XCTAssertEqual(rows("=D5+1", [5]), "=#REF!+1")
+        XCTAssertEqual(rows("=$D$9", [3, 4]), "=$D$7")           // anchors follow the cell too
+        XCTAssertEqual(rows("=D1&D2", [2]), "=D1&#REF!")         // the header row never moves
+    }
+
+    func testRowDeleteShrinksRanges() {
+        XCTAssertEqual(rows("=SUM(D2:D10)", [5, 6]), "=SUM(D2:D8)")
+        XCTAssertEqual(rows("=SUM(D2:D4)", [2]), "=SUM(D2:D3)")
+        XCTAssertEqual(rows("=SUM(D4:D2)", [4]), "=SUM(D3:D2)")
+        XCTAssertEqual(rows("=SUM(D5:D6)", [5, 6]), "=SUM(#REF!)")
+        XCTAssertEqual(rows("=COUNT(D:D)", [5]), "=COUNT(D:D)")
+    }
+
+    func testColumnDeleteShiftsAndBreaksReferences() {
+        XCTAssertEqual(cols("=D2*E2", [1]), "=C2*D2")
+        XCTAssertEqual(cols("=D2*E2", [3]), "=#REF!*D2")
+        XCTAssertEqual(cols("=SUM(B2:F2)", [1, 3]), "=SUM(B2:D2)")
+        XCTAssertEqual(cols("=COUNT(D:D)", [3]), "=COUNT(#REF!)")
+        XCTAssertEqual(cols("=SUM(A:C)", [1]), "=SUM(A:B)")
+    }
+
+    func testOnlyReferencesToTheEditedSheetMove() {
+        XCTAssertEqual(rows("=Orders!D9+D9", [5], own: false), "=Orders!D8+D9")
+        XCTAssertEqual(rows("='orders'!D9+Pricing!D9", [5]), "='orders'!D8+Pricing!D9")
+        XCTAssertEqual(rows("=SUM(Pricing!B2:B9)+D9", [5]), "=SUM(Pricing!B2:B9)+D8")
+    }
+
+    func testLeavesNonReferencesAlone() {
+        XCTAssertEqual(rows("=IF(D9>3, \"D9\", LOG10(2))", [5]), "=IF(D8>3, \"D9\", LOG10(2))")
+        XCTAssertEqual(rows("=#REF!+D9", [5]), "=#REF!+D8")
+        XCTAssertEqual(rows("=1.5*D9", [5]), "=1.5*D8")
+    }
+}
+
+final class StructureWorkbookTests: XCTestCase {
+    private func orders() -> (Workbook, UUID) { let wb = SampleData.workbook(); return (wb, wb.sheets[0].id) }
+
+    func testDeleteRowsClosesGapAndKeepsFormulasOnTheirData() {
+        var (wb, id) = orders()
+        let before = wb.evaluatedRows(of: wb.sheets[0])
+        XCTAssertEqual(wb.deleteRows(sheetID: id, sourceRows: [1, 2]), 2)
+        XCTAssertEqual(wb.sheets[0].rows.count, before.count - 2)
+        XCTAssertEqual(wb.sheets[0].rows[1][0], .text("OR-1044"))
+        XCTAssertEqual(wb.sheets[0].rows[1][5], .formula("=D3*E3"))                // was =D5*E5
+        XCTAssertEqual(wb.evaluatedRows(of: wb.sheets[0]), [before[0]] + before[3...])
+        XCTAssertEqual(wb.sheets[0].columns[5].formulaTemplate, "=D{row}*E{row}")
+        XCTAssertEqual(wb.deleteRows(sheetID: id, sourceRows: [999]), 0)
+    }
+
+    func testDeleteRowsRewritesOtherSheets() {
+        var (wb, id) = orders()
+        wb.sheets[1].rows[0][0] = .formula("=Orders!D5+SUM(Orders!D2:D4)")
+        wb.deleteRows(sheetID: id, sourceRows: [1])
+        XCTAssertEqual(wb.sheets[1].rows[0][0], .formula("=Orders!D4+SUM(Orders!D2:D3)"))
+    }
+
+    func testDeleteColumnsFixesSortFilterPinsAndTemplates() throws {
+        var (wb, id) = orders()
+        wb.sheets[0].sorts = [SortKey(column: 1, ascending: true), SortKey(column: 6, ascending: false)]
+        wb.sheets[0].filter = ValueFilter(column: 7, values: ["Shipped"])
+        wb.sheets[0].pinnedColumns = 3
+        let revenue = wb.evaluatedRows(of: wb.sheets[0]).map { $0[5] }
+        let result = try XCTUnwrap(wb.deleteColumns(sheetID: id, columns: [1, 2]))   // Region, Product
+        XCTAssertEqual(result.names, ["Region", "Product"])
+        XCTAssertEqual(wb.sheets[0].columns.map { $0.name }, ["Order", "Units", "Unit price", "Revenue", "Margin", "Status", "Notes"])
+        XCTAssertTrue(wb.sheets[0].rows.allSatisfy { $0.count == 7 })
+        XCTAssertEqual(wb.sheets[0].sorts, [SortKey(column: 4, ascending: false)])
+        XCTAssertEqual(wb.sheets[0].filter, ValueFilter(column: 5, values: ["Shipped"]))
+        XCTAssertEqual(wb.sheets[0].pinnedColumns, 1)
+        XCTAssertEqual(wb.sheets[0].rows[0][3], .formula("=B2*C2"))
+        XCTAssertEqual(wb.sheets[0].columns[3].formulaTemplate, "=B{row}*C{row}")
+        XCTAssertEqual(wb.evaluatedRows(of: wb.sheets[0]).map { $0[3] }, revenue)
+    }
+
+    func testDeleteColumnsRefusesToEmptyTheSheet() {
+        var (wb, id) = orders()
+        let before = wb
+        XCTAssertNil(wb.deleteColumns(sheetID: id, columns: Set(0..<9)))
+        XCTAssertNil(wb.deleteColumns(sheetID: id, columns: []))
+        XCTAssertEqual(wb, before)
+    }
+
+    func testDeleteColumnsTakesDependentViewsAndTrimsOptionalFields() throws {
+        var (wb, id) = orders()
+        let keep = Card(kind: .pivot(PivotConfig(sheetID: id, rowField: "Status", columnField: "Region", valueField: "Revenue")), origin: .zero)
+        let lose = Card(kind: .pivot(PivotConfig(sheetID: id, rowField: "Region", valueField: "Revenue")), origin: .zero)
+        let chart = Card(kind: .chart(ChartConfig(sheetID: id, type: .stacked, xField: "Status", yField: "Revenue", seriesField: "Region")), origin: .zero)
+        wb.canvases[0].cards = [try XCTUnwrap(wb.canvases[0].gridCard), keep, lose, chart]
+        let result = try XCTUnwrap(wb.deleteColumns(sheetID: id, columns: [1]))
+        XCTAssertEqual(result.removedViews, 1)
+        XCTAssertEqual(wb.canvases[0].cards.map { $0.id }, [wb.canvases[0].cards[0].id, keep.id, chart.id])
+        guard case .pivot(let p) = wb.canvases[0].cards[1].kind, case .chart(let c) = wb.canvases[0].cards[2].kind else { return XCTFail() }
+        XCTAssertNil(p.columnField)
+        XCTAssertNil(c.seriesField)
+        XCTAssertEqual(c.type, .column)
+        XCTAssertNotNil(wb.pivot(p))
+        XCTAssertNotNil(wb.chart(c))
+    }
+}
+
+final class FullscreenLayoutTests: XCTestCase {
+    func testFullscreenLaysOutOnlyThatViewAtTheGivenFrame() throws {
+        let wb = SampleData.workbook()
+        let canvas = try XCTUnwrap(wb.canvases.first)
+        let view = try XCTUnwrap(canvas.cards.first { !$0.kind.isGrid })
+        let frame = Layout.fullscreenFrame(viewport: CGSize(width: 1200, height: 700), panelOpen: false)
+        XCTAssertEqual(frame, CGRect(x: 12, y: 12, width: 1176, height: 676))
+        XCTAssertEqual(Layout.fullscreenFrame(viewport: CGSize(width: 1200, height: 700), panelOpen: true).width, 836)
+        let layouts = Layout.layouts(canvas: canvas, workbook: wb, fullscreen: (view.id, frame))
+        XCTAssertEqual(layouts.map { $0.card.id }, [view.id])
+        XCTAssertEqual(layouts[0].frame, frame)
+        // The grid can't go full screen: asking for it lays out nothing rather than everything.
+        let grid = try XCTUnwrap(canvas.gridCard)
+        XCTAssertTrue(Layout.layouts(canvas: canvas, workbook: wb, fullscreen: (grid.id, frame)).isEmpty)
+    }
+
+    func testViewHeaderButtons() throws {
+        let wb = SampleData.workbook()
+        let canvas = try XCTUnwrap(wb.canvases.first)
+        let l = try XCTUnwrap(Layout.layouts(canvas: canvas, workbook: wb).first { !$0.card.kind.isGrid })
+        let y = l.frame.minY + 10, id = l.card.id
+        func hit(_ fromRight: CGFloat) -> Layout.Hit { Layout.hit(CGPoint(x: l.frame.maxX - fromRight, y: y), layouts: [l]) }
+        if case .removeView(id) = hit(15) {} else { XCTFail("far right is remove") }
+        if case .toggleFullscreen(id) = hit(43) {} else { XCTFail("left of remove is full screen") }
+        if case .cardHeader(id) = hit(80) {} else { XCTFail("the rest of the header drags the card") }
+    }
+
+    func testPivotMetrics() throws {
+        let wb = SampleData.workbook()
+        let cfg = PivotConfig(sheetID: wb.sheets[0].id, rowField: "Region", columnField: "Status", valueField: "Revenue")
+        let p = try XCTUnwrap(wb.pivot(cfg))
+        let natural = Layout.pivotSize(p, totals: true)
+        let m = Layout.pivotMetrics(p, totals: true, frame: natural)
+        XCTAssertEqual(m, Layout.PivotMetrics(labelWidth: Layout.pivotLabelWidth, valueWidth: Layout.pivotValueWidth, totalWidth: Layout.pivotTotalWidth, rowHeight: Layout.rowHeight, fontSize: 12, maxScroll: 0))
+        // A big frame: columns fill the width, rows and text stop growing at 1.5×.
+        let big = Layout.pivotMetrics(p, totals: true, frame: CGSize(width: natural.width * 3, height: natural.height * 3))
+        XCTAssertEqual(big.rowHeight, 36)
+        XCTAssertEqual(big.fontSize, 18)
+        let cols = CGFloat(p.columnHeaders.count)
+        XCTAssertEqual(big.labelWidth + big.valueWidth * cols + big.totalWidth, natural.width * 3 - Layout.border * 2 - 2, accuracy: 0.01)
+        // Too short for the rows: natural row height, and the rest scrolls.
+        let short = Layout.pivotMetrics(p, totals: true, frame: CGSize(width: natural.width, height: natural.height - 60))
+        XCTAssertEqual(short.rowHeight, Layout.rowHeight)
+        XCTAssertEqual(short.maxScroll, 60, accuracy: 0.01)
+    }
+
+    func testChartScale() {
+        XCTAssertEqual(Layout.chartScale(frame: Layout.chartSize), 1)
+        XCTAssertEqual(Layout.chartScale(frame: CGSize(width: 900, height: 300)), 1)
+        XCTAssertEqual(Layout.chartScale(frame: CGSize(width: 660, height: 600)), 1.5)
+        XCTAssertEqual(Layout.chartScale(frame: CGSize(width: 4000, height: 3000)), 2)
+    }
+}
+
+/// Whole-row and whole-column selection, delete and full screen through `AppState`.
+@MainActor
+final class StructureAppStateTests: XCTestCase {
+    private var state: AppState!
+    private var card: UUID!
+
+    override func setUp() async throws {
+        state = AppState()
+        state.workbook = SampleData.workbook()
+        state.canvasIndex = 0
+        state.undoManager.removeAllActions()
+        card = try XCTUnwrap(state.gridCard?.id)
+    }
+
+    private var sheet: Sheet { state.workbook.sheets[0] }
+
+    func testRowSelectionSpansTheSheetAndExtends() {
+        state.selectRows(card: card, row: 2, extend: false)
+        state.selectRows(card: card, row: 4, extend: true)
+        XCTAssertEqual(state.selection, Selection(cardID: card, anchor: CellRef(row: 2, col: 0), focus: CellRef(row: 4, col: 8), span: .rows))
+        state.moveSelection(dRow: 1, dCol: -3, extend: true)          // grows by rows only
+        XCTAssertEqual(state.selection?.focus, CellRef(row: 5, col: 8))
+        state.appendColumn()
+        XCTAssertEqual(state.selection?.focus.col, 9)                 // still edge to edge
+        state.moveSelection(dRow: 0, dCol: 1, extend: false)
+        XCTAssertEqual(state.selection?.span, .cells)
+        XCTAssertFalse(state.deleteSelection())                       // plain cells: ⌘⌫ deletes nothing
+    }
+
+    func testDeleteRowsUnderSortAndFilterRemovesWhatIsShown() {
+        state.workbook.sheets[0].filter = ValueFilter(column: 1, values: ["West"])
+        state.workbook.sheets[0].sorts = [SortKey(column: 3, ascending: false)]   // West by units: OR-1051, 1056, 1041, 1046
+        let before = state.workbook
+        state.selectRows(card: card, row: 0, extend: false)
+        state.selectRows(card: card, row: 1, extend: true)
+        XCTAssertTrue(state.canDeleteRows)
+        XCTAssertTrue(state.deleteSelection())
+        XCTAssertEqual(sheet.rows.count, 19)
+        XCTAssertFalse(sheet.rows.contains { $0[0] == .text("OR-1051") || $0[0] == .text("OR-1056") })
+        XCTAssertEqual(state.workbook.visibleRows(of: sheet).map { CellFormatter.plainText($0.values[0]) }, ["OR-1041", "OR-1046"])
+        XCTAssertEqual(state.selection, Selection(cardID: card, anchor: CellRef(row: 0, col: 0), focus: CellRef(row: 0, col: 8), span: .rows))
+        XCTAssertEqual(state.undoManager.undoActionName, "Delete Rows")
+        state.undoManager.undo()
+        XCTAssertEqual(state.workbook, before)
+    }
+
+    func testDeleteColumnsThroughTheMenu() {
+        let before = state.workbook
+        let views = state.canvas.cards.count
+        state.openColumnMenu(cardID: card, column: 8, anchor: .zero)                  // Notes: nothing depends on it
+        XCTAssertEqual(state.selection?.span, .columns)
+        state.openColumnMenu(cardID: card, column: 7, anchor: .zero, extend: true)
+        XCTAssertEqual(state.selection.map { [$0.minCol, $0.maxCol] }, [7, 8])
+        XCTAssertNotNil(state.columnMenu)
+        state.deleteSelectedColumns()
+        XCTAssertNil(state.columnMenu)
+        XCTAssertEqual(sheet.columns.count, 7)
+        XCTAssertLessThanOrEqual(state.canvas.cards.count, views)
+        XCTAssertEqual(state.selection?.span, .columns)
+        XCTAssertEqual(state.selection?.minCol, 6)                                    // clamped onto the new last column
+        state.undoManager.undo()
+        XCTAssertEqual(state.workbook, before)
+    }
+
+    func testLastColumnCannotBeDeleted() {
+        let before = state.workbook
+        state.selectColumns(card: card, column: 0, extend: false)
+        state.selectColumns(card: card, column: 8, extend: true)
+        XCTAssertFalse(state.canDeleteColumns)
+        state.deleteSelectedColumns()
+        XCTAssertEqual(state.workbook, before)
+    }
+
+    func testRowMenuTogglesAndFollowsSelection() {
+        state.openRowMenu(cardID: card, row: 3, anchor: .zero)
+        XCTAssertEqual(state.rowMenu?.row, 3)
+        XCTAssertEqual(state.selection?.span, .rows)
+        state.openColumnMenu(cardID: card, column: 1, anchor: .zero, showFilter: true)
+        XCTAssertNil(state.rowMenu)
+        XCTAssertEqual(state.columnMenu?.showFilter, true)
+        state.openRowMenu(cardID: card, row: 3, anchor: .zero)
+        state.openRowMenu(cardID: card, row: 3, anchor: .zero)
+        XCTAssertNil(state.rowMenu)
+        XCTAssertNil(state.columnMenu)
+    }
+
+    func testFullscreenIsOnlyForViewsAndEndsWithTheCard() throws {
+        let view = try XCTUnwrap(state.canvas.cards.first { !$0.kind.isGrid })
+        state.toggleFullscreen(card)
+        XCTAssertNil(state.fullscreenCard)
+        state.select(card: card, row: 0, col: 0, extend: false)
+        state.toggleFullscreen(view.id)
+        XCTAssertEqual(state.fullscreenCard?.id, view.id)
+        XCTAssertFalse(state.canCopy)                                 // the hidden grid is not edited blind
+        state.toggleFullscreen(view.id)
+        XCTAssertNil(state.fullscreenCard)
+        state.toggleFullscreen(view.id)
+        state.removeCard(view.id)
+        XCTAssertNil(state.fullscreenCardID)
+    }
+
+    func testStepCanvasWraps() {
+        let n = state.workbook.canvases.count
+        XCTAssertGreaterThan(n, 1)
+        state.stepCanvas(-1)
+        XCTAssertEqual(state.canvasIndex, n - 1)
+        state.stepCanvas(1)
+        XCTAssertEqual(state.canvasIndex, 0)
+    }
+}
+
+final class TitleBarTests: XCTestCase {
+    func testDoubleClickFollowsTheSystemSetting() throws {
+        let name = "grid.tests.\(UUID().uuidString)"
+        let d = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { d.removePersistentDomain(forName: name) }
+        d.set("Minimize", forKey: "AppleActionOnDoubleClick")
+        XCTAssertEqual(TitleBarDragArea.doubleClickAction(defaults: d), .minimize)
+        d.set("None", forKey: "AppleActionOnDoubleClick")
+        XCTAssertEqual(TitleBarDragArea.doubleClickAction(defaults: d), .none)
+        d.set("Maximize", forKey: "AppleActionOnDoubleClick")
+        XCTAssertEqual(TitleBarDragArea.doubleClickAction(defaults: d), .zoom)
+    }
+}
+
+final class InsertTests: XCTestCase {
+    private func orders() -> (Workbook, UUID) { let wb = SampleData.workbook(); return (wb, wb.sheets[0].id) }
+    private func adjust(_ f: String, _ edit: StructuralEdit) -> String {
+        Formula.adjusted(f, for: edit, sheetName: "Orders", inEditedSheet: true)
+    }
+
+    func testInsertShiftsReferencesAndGrowsSpanningRanges() {
+        XCTAssertEqual(adjust("=D2*E9+$D$5", .insertRows(before: 5, count: 1)), "=D2*E10+$D$6")
+        XCTAssertEqual(adjust("=SUM(D2:D10)", .insertRows(before: 5, count: 2)), "=SUM(D2:D12)")
+        XCTAssertEqual(adjust("=SUM(D2:D4)", .insertRows(before: 5, count: 1)), "=SUM(D2:D4)")     // just past the end: not taken in
+        XCTAssertEqual(adjust("=SUM(D2:D4)", .insertRows(before: 2, count: 1)), "=SUM(D3:D5)")
+        XCTAssertEqual(adjust("=COUNT(D:D)+D1", .insertRows(before: 2, count: 1)), "=COUNT(D:D)+D1")
+        XCTAssertEqual(adjust("=D2*E2", .insertColumns(before: 4, count: 1)), "=D2*F2")
+        XCTAssertEqual(adjust("=SUM(B2:F2)+COUNT(D:D)", .insertColumns(before: 3, count: 2)), "=SUM(B2:H2)+COUNT(F:F)")
+    }
+
+    func testInsertRowKeepsEveryFormulaOnItsData() {
+        var (wb, id) = orders()
+        wb.sheets[1].rows[0][0] = .formula("=Orders!D5+SUM(Orders!D2:D4)")
+        let before = wb.evaluatedRows(of: wb.sheets[0])
+        XCTAssertTrue(wb.insertRows(sheetID: id, at: 2))
+        XCTAssertEqual(wb.sheets[0].rows.count, before.count + 1)
+        XCTAssertEqual(wb.sheets[0].rows[2][0], .empty)
+        XCTAssertEqual(wb.sheets[0].rows[2][5], .formula("=D4*E4"))                  // from the column template
+        XCTAssertEqual(wb.sheets[0].rows[3][5], .formula("=D5*E5"))                  // was =D4*E4
+        let after = wb.evaluatedRows(of: wb.sheets[0])
+        XCTAssertEqual(Array(after[..<2]) + Array(after[3...]), before)
+        XCTAssertEqual(wb.sheets[1].rows[0][0], .formula("=Orders!D6+SUM(Orders!D2:D5)"))
+        XCTAssertTrue(wb.insertRows(sheetID: id, at: wb.sheets[0].rows.count))        // at the end, like append
+        XCTAssertFalse(wb.insertRows(sheetID: id, at: 999))
+    }
+
+    func testInsertColumnKeepsSortFilterPinsViewsAndFormulas() throws {
+        var (wb, id) = orders()
+        wb.sheets[0].sorts = [SortKey(column: 1, ascending: true), SortKey(column: 6, ascending: false)]
+        wb.sheets[0].filter = ValueFilter(column: 7, values: ["Shipped"])
+        wb.sheets[0].pinnedColumns = 3
+        let revenue = wb.evaluatedRows(of: wb.sheets[0]).map { $0[5] }
+        let cards = wb.canvases[0].cards
+        XCTAssertEqual(wb.insertColumns(sheetID: id, at: 2), ["Col C"])
+        XCTAssertEqual(wb.sheets[0].columns.map { $0.name }, ["Order", "Region", "Col C", "Product", "Units", "Unit price", "Revenue", "Margin", "Status", "Notes"])
+        XCTAssertTrue(wb.sheets[0].rows.allSatisfy { $0.count == 10 && $0[2] == .empty })
+        XCTAssertEqual(wb.sheets[0].sorts, [SortKey(column: 1, ascending: true), SortKey(column: 7, ascending: false)])
+        XCTAssertEqual(wb.sheets[0].filter, ValueFilter(column: 8, values: ["Shipped"]))
+        XCTAssertEqual(wb.sheets[0].pinnedColumns, 4)
+        XCTAssertEqual(wb.sheets[0].rows[0][6], .formula("=E2*F2"))
+        XCTAssertEqual(wb.sheets[0].columns[6].formulaTemplate, "=E{row}*F{row}")
+        XCTAssertEqual(wb.evaluatedRows(of: wb.sheets[0]).map { $0[6] }, revenue)
+        XCTAssertEqual(wb.canvases[0].cards, cards)
+        XCTAssertEqual(wb.insertColumns(sheetID: id, at: 2), ["Col C 2"])            // names stay unique for views
+        XCTAssertEqual(wb.insertColumns(sheetID: id, at: 11), ["Col L"])             // at the end, like append
+        XCTAssertNil(wb.insertColumns(sheetID: id, at: 99))
+    }
+}
+
+@MainActor
+final class InsertAppStateTests: XCTestCase {
+    private var state: AppState!
+    private var card: UUID!
+
+    override func setUp() async throws {
+        state = AppState()
+        state.workbook = SampleData.workbook()
+        state.canvasIndex = 0
+        state.undoManager.removeAllActions()
+        card = try XCTUnwrap(state.gridCard?.id)
+    }
+
+    private var sheet: Sheet { state.workbook.sheets[0] }
+
+    func testInsertRowAboveAndBelowTheSelection() {
+        let before = state.workbook
+        state.select(card: card, row: 2, col: 0, extend: false)
+        XCTAssertFalse(state.canInsertRows)                                     // whole rows only
+        state.insertRow(below: false)
+        XCTAssertEqual(state.workbook, before)
+        state.selectRows(card: card, row: 2, extend: false)
+        state.selectRows(card: card, row: 3, extend: true)
+        state.insertRow(below: true)
+        XCTAssertEqual(sheet.rows.count, 22)
+        XCTAssertEqual(sheet.rows[4][0], .empty)
+        XCTAssertEqual(sheet.rows[3][0], .text("OR-1044"))
+        XCTAssertEqual(state.selection, Selection(cardID: card, anchor: CellRef(row: 4, col: 0), focus: CellRef(row: 4, col: 8), span: .rows))
+        state.insertRow(below: false)
+        XCTAssertEqual(sheet.rows[4][0], .empty)
+        XCTAssertEqual(sheet.rows[5][0], .empty)
+        XCTAssertEqual(sheet.rows[6][0], .text("OR-1045"))
+        XCTAssertEqual(state.undoManager.undoActionName, "Insert Row")
+        state.undoManager.undo(); state.undoManager.undo()
+        XCTAssertEqual(state.workbook, before)
+    }
+
+    func testInsertRowUnderSortGoesNextToTheRowInTheSheet() {
+        state.workbook.sheets[0].sorts = [SortKey(column: 3, ascending: false)]   // display row 0 is OR-1059, sheet row 18
+        state.selectRows(card: card, row: 0, extend: false)
+        state.insertRow(below: false)
+        XCTAssertEqual(sheet.rows[18][0], .empty)
+        XCTAssertEqual(sheet.rows[19][0], .text("OR-1059"))
+        // The empty row sorts to the bottom, and the selection follows it there.
+        XCTAssertEqual(state.selection?.minRow, 21)
+        XCTAssertEqual(state.selection?.span, .rows)
+    }
+
+    func testInsertColumnLeftAndRight() {
+        let before = state.workbook
+        state.selectColumns(card: card, column: 3, extend: false)
+        state.selectColumns(card: card, column: 4, extend: true)
+        state.insertColumn(right: true)
+        XCTAssertEqual(sheet.columns.map { $0.name }[3...6], ["Units", "Unit price", "Col F", "Revenue"])
+        XCTAssertEqual(state.selection.map { [$0.minCol, $0.maxCol] }, [5, 5])
+        XCTAssertEqual(state.selection?.span, .columns)
+        state.insertColumn(right: false)
+        XCTAssertEqual(sheet.columns.map { $0.name }[5...6], ["Col F 2", "Col F"])
+        XCTAssertEqual(sheet.rows[0][7], .formula("=D2*E2"))                   // Revenue moved right; its inputs did not
+        state.undoManager.undo(); state.undoManager.undo()
+        XCTAssertEqual(state.workbook, before)
+    }
+}

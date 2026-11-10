@@ -56,15 +56,18 @@ struct TabBarView: View {
                 .font(Theme.uiFont(11))
                 .foregroundStyle(theme.subtext.swiftUI)
                 .padding(.leading, 6)
+                .allowsHitTesting(false)
             Text(state.dirty ? "edited" : "saved")
                 .font(Theme.uiFont(11))
                 .foregroundStyle(theme.text.swiftUI)
+                .allowsHitTesting(false)
 
             Spacer()
 
             Text(headline)
                 .font(Theme.uiFont(10.5))
                 .foregroundStyle(theme.subtext.swiftUI)
+                .allowsHitTesting(false)
             Button { state.togglePalette() } label: {
                 HStack(spacing: 8) {
                     Text("run").font(Theme.uiFont(11, weight: .semibold)).foregroundStyle(theme.accent.swiftUI)
@@ -80,10 +83,12 @@ struct TabBarView: View {
         }
         .padding(.horizontal, 14)
         .frame(height: TabBarView.height)
+        .background(TitleBarDragArea())   // labels above don't hit-test, so they count as empty space
         .animation(.easeOut(duration: 0.2), value: state.canvasIndex)
     }
 
     private var headline: String {
+        if state.fullscreenCard != nil { return "view fills the canvas — esc to exit" }
         if state.selectedCardID != nil { return "editing a view — panel floats over the canvas" }
         if state.selection != nil { return "selection → pivot ⌘⇧P · chart ⌘⇧C · filter ⌘⇧L" }
         return "canvas \(state.canvasIndex + 1) · \(state.canvas.cards.count - 1) views"

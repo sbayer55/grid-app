@@ -212,10 +212,15 @@ struct CellRef: Equatable, Hashable {
     var col: Int
 }
 
+/// What a selection stands for. Whole rows and whole columns are picked from the row numbers
+/// and column headers; they are what ⌘⌫ and the delete commands remove.
+enum SelectionSpan: Equatable { case cells, rows, columns }
+
 struct Selection: Equatable {
     var cardID: UUID
     var anchor: CellRef
     var focus: CellRef
+    var span: SelectionSpan = .cells
 
     var minRow: Int { min(anchor.row, focus.row) }
     var maxRow: Int { max(anchor.row, focus.row) }

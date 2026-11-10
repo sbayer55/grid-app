@@ -9,6 +9,16 @@ struct ColumnMenuState: Equatable {
     var sheetID: UUID
     var column: Int
     var anchor: CGPoint
+    /// Whether the filter values flyout is out.
+    var showFilter = false
+}
+
+/// The row-number menu. `row` is a display row; `anchor` is in canvas-viewport points.
+struct RowMenuState: Equatable {
+    var cardID: UUID
+    var sheetID: UUID
+    var row: Int
+    var anchor: CGPoint
 }
 
 struct Toast: Equatable { var text: String; var id = UUID() }
@@ -24,7 +34,10 @@ final class AppState: ObservableObject {
     @Published var canvasIndex = 0
     @Published var selection: Selection?
     @Published var columnMenu: ColumnMenuState?
+    @Published var rowMenu: RowMenuState?
     @Published var selectedCardID: UUID?
+    /// The pivot or chart currently filling the canvas area, if any. Not saved, not undoable.
+    @Published var fullscreenCardID: UUID?
     @Published var paletteOpen = false
     @Published var paletteQuery = ""
     @Published var paletteIndex = 0
@@ -70,6 +83,9 @@ final class AppState: ObservableObject {
     }
     var selectedSheet: Sheet? { selection.flatMap { sheet(for: $0.cardID) } }
     var selectedCard: Card? { selectedCardID.flatMap { id in canvas.cards.first { $0.id == id } } }
+
+    /// The view filling the canvas; nil once its card is gone or another canvas is showing.
+    var fullscreenCard: Card? { fullscreenCardID.flatMap { id in canvas.cards.first { $0.id == id && !$0.kind.isGrid } } }
 
     var title: String { (fileURL?.deletingPathExtension().lastPathComponent ?? "Untitled") + ".xlsx" }
 
@@ -132,21 +148,43 @@ final class AppState: ObservableObject {
 
     // MARK: Selection
 
+    func closeMenus() { columnMenu = nil; rowMenu = nil }
+
     func select(card: UUID, row: Int, col: Int, extend: Bool) {
-        columnMenu = nil
-        if extend, var s = selection, s.cardID == card { s.focus = CellRef(row: row, col: col); selection = s }
+        closeMenus()
+        if extend, var s = selection, s.cardID == card { s.focus = CellRef(row: row, col: col); s.span = .cells; selection = s }
         else { selection = Selection(cardID: card, anchor: CellRef(row: row, col: col), focus: CellRef(row: row, col: col)) }
+    }
+
+    /// Selects a whole display row; `extend` grows an existing row selection to it.
+    func selectRows(card: UUID, row: Int, extend: Bool) {
+        guard let sheet = sheet(for: card) else { return }
+        let lastCol = max(0, sheet.columns.count - 1)
+        let from = extend && selection?.cardID == card && selection?.span == .rows ? selection!.anchor.row : row
+        selection = Selection(cardID: card, anchor: CellRef(row: from, col: 0), focus: CellRef(row: row, col: lastCol), span: .rows)
+        selectedCardID = nil
+    }
+
+    /// Selects a whole column; `extend` grows an existing column selection to it.
+    func selectColumns(card: UUID, column: Int, extend: Bool) {
+        guard let sheet = sheet(for: card) else { return }
+        let lastRow = max(0, workbook.visibleRows(of: sheet).count - 1)
+        let from = extend && selection?.cardID == card && selection?.span == .columns ? selection!.anchor.col : column
+        selection = Selection(cardID: card, anchor: CellRef(row: 0, col: from), focus: CellRef(row: lastRow, col: column), span: .columns)
+        selectedCardID = nil
     }
 
     func moveSelection(dRow: Int, dCol: Int, extend: Bool) {
         guard var s = selection, let sheet = sheet(for: s.cardID) else { return }
         let rows = workbook.visibleRows(of: sheet).count
         var target = extend ? s.focus : s.anchor
+        // Whole rows only grow by rows and whole columns by columns; a plain move goes back to cells.
+        let dRow = extend && s.span == .columns ? 0 : dRow, dCol = extend && s.span == .rows ? 0 : dCol
         target.row = max(0, min(rows - 1, target.row + dRow))
         target.col = max(0, min(sheet.columns.count - 1, target.col + dCol))
-        if extend { s.focus = target } else { s.anchor = target; s.focus = target }
+        if extend { s.focus = target } else { s.anchor = target; s.focus = target; s.span = .cells }
         selection = s
-        columnMenu = nil
+        closeMenus()
     }
 
     func clampSelection() {
@@ -154,6 +192,9 @@ final class AppState: ObservableObject {
         let rows = max(0, workbook.visibleRows(of: sheet).count - 1), cols = max(0, sheet.columns.count - 1)
         s.anchor.row = min(s.anchor.row, rows); s.focus.row = min(s.focus.row, rows)
         s.anchor.col = min(s.anchor.col, cols); s.focus.col = min(s.focus.col, cols)
+        // Whole rows and columns keep reaching edge to edge as the sheet grows or shrinks.
+        if s.span == .rows { s.anchor.col = 0; s.focus.col = cols }
+        if s.span == .columns { s.anchor.row = 0; s.focus.row = rows }
         selection = s
     }
 
@@ -190,7 +231,8 @@ final class AppState: ObservableObject {
 
     /// The selection, when it sits on a sheet card (view cards have nothing to copy).
     private var gridSelection: (selection: Selection, sheet: Sheet)? {
-        guard let s = selection, let card = canvas.cards.first(where: { $0.id == s.cardID }), card.kind.isGrid,
+        guard fullscreenCard == nil,   // the grid is hidden behind a full screen view
+              let s = selection, let card = canvas.cards.first(where: { $0.id == s.cardID }), card.kind.isGrid,
               let sheet = sheet(for: s.cardID) else { return nil }
         return (s, sheet)
     }
@@ -305,13 +347,108 @@ final class AppState: ObservableObject {
     }
     func clearFilter(sheetID: UUID) { updateSheet(sheetID, "Clear Filter") { $0.filter = nil } }
 
-    func openColumnMenu(cardID: UUID, column: Int, anchor: CGPoint) {
+    /// Selects the column (or extends a column selection to it) and opens its menu;
+    /// `showFilter` opens it with the filter values flyout already out.
+    func openColumnMenu(cardID: UUID, column: Int, anchor: CGPoint, extend: Bool = false, showFilter: Bool = false) {
         guard let sheet = sheet(for: cardID) else { return }
-        if columnMenu?.column == column, columnMenu?.cardID == cardID { columnMenu = nil; return }
-        selectedCardID = nil
-        let rows = max(0, workbook.visibleRows(of: sheet).count - 1)
-        selection = Selection(cardID: cardID, anchor: CellRef(row: 0, col: column), focus: CellRef(row: rows, col: column))
-        columnMenu = ColumnMenuState(cardID: cardID, sheetID: sheet.id, column: column, anchor: anchor)
+        if columnMenu?.column == column, columnMenu?.cardID == cardID, !extend, !showFilter { closeMenus(); return }
+        selectColumns(card: cardID, column: column, extend: extend)
+        rowMenu = nil
+        columnMenu = ColumnMenuState(cardID: cardID, sheetID: sheet.id, column: column, anchor: anchor, showFilter: showFilter)
+    }
+
+    /// Selects the row (or extends a row selection to it) and opens the row menu beside it.
+    func openRowMenu(cardID: UUID, row: Int, anchor: CGPoint, extend: Bool = false) {
+        guard let sheet = sheet(for: cardID) else { return }
+        if rowMenu?.row == row, rowMenu?.cardID == cardID, !extend { rowMenu = nil; return }
+        selectRows(card: cardID, row: row, extend: extend)
+        closeMenus()
+        rowMenu = RowMenuState(cardID: cardID, sheetID: sheet.id, row: row, anchor: anchor)
+    }
+
+    // MARK: Inserting and deleting rows and columns
+
+    /// The selection when it is whole rows or whole columns of the sheet card.
+    private func structuralSelection(_ span: SelectionSpan) -> (selection: Selection, sheet: Sheet)? {
+        guard let (s, sheet) = gridSelection, s.span == span else { return nil }
+        return (s, sheet)
+    }
+    var canDeleteRows: Bool { structuralSelection(.rows) != nil }
+    var canDeleteColumns: Bool { structuralSelection(.columns).map { $0.selection.maxCol - $0.selection.minCol + 1 < $0.sheet.columns.count } ?? false }
+
+    /// ⌘⌫: removes the selected whole rows or columns. False when the selection is plain cells.
+    @discardableResult
+    func deleteSelection() -> Bool {
+        switch selection?.span {
+        case .rows?: deleteSelectedRows(); return true
+        case .columns?: deleteSelectedColumns(); return true
+        default: return false
+        }
+    }
+
+    var canInsertRows: Bool { structuralSelection(.rows) != nil }
+    var canInsertColumns: Bool { structuralSelection(.columns) != nil }
+
+    /// Adds an empty row above the first selected row or below the last one.
+    func insertRow(below: Bool) {
+        guard let (s, sheet) = structuralSelection(.rows) else { return }
+        let visible = workbook.visibleRows(of: sheet)
+        let edge = below ? s.maxRow : s.minRow
+        guard visible.indices.contains(edge) else { return }
+        let at = visible[edge].sourceIndex + (below ? 1 : 0)
+        closeMenus()
+        mutate("Insert Row") { wb in wb.insertRows(sheetID: sheet.id, at: at) }
+        // Select the new row where it is shown. An empty row can be sorted elsewhere or filtered out.
+        let shown = workbook.sheet(sheet.id).flatMap { workbook.visibleRows(of: $0).firstIndex { $0.sourceIndex == at } }
+        if let r = shown {
+            selection = Selection(cardID: s.cardID, anchor: CellRef(row: r, col: 0), focus: CellRef(row: r, col: 0), span: .rows)
+        }
+        clampSelection()
+        if shown == nil { show("row inserted — hidden by the filter on this sheet") }
+        else if shown != (below ? s.maxRow + 1 : s.minRow) { show("row inserted — the sort moved it to row \(shown! + 2)") }
+        else { show("inserted row \(shown! + 2)") }
+    }
+
+    /// Adds an empty text column left of the first selected column or right of the last one.
+    func insertColumn(right: Bool) {
+        guard let (s, sheet) = structuralSelection(.columns) else { return }
+        let at = right ? min(s.maxCol, sheet.columns.count - 1) + 1 : s.minCol
+        closeMenus()
+        var names: [String]?
+        mutate("Insert Column") { wb in names = wb.insertColumns(sheetID: sheet.id, at: at) }
+        guard let name = names?.first else { return }
+        selection = Selection(cardID: s.cardID, anchor: CellRef(row: 0, col: at), focus: CellRef(row: 0, col: at), span: .columns)
+        clampSelection()
+        show("inserted \(name) at \(Sheet.columnLetter(at))")
+    }
+
+    func deleteSelectedRows() {
+        guard let (s, sheet) = structuralSelection(.rows) else { return }
+        let visible = workbook.visibleRows(of: sheet)
+        let doomed = Set((s.minRow...s.maxRow).compactMap { visible.indices.contains($0) ? visible[$0].sourceIndex : nil })
+        guard !doomed.isEmpty else { return }
+        closeMenus()
+        mutate(doomed.count == 1 ? "Delete Row" : "Delete Rows") { wb in wb.deleteRows(sheetID: sheet.id, sourceRows: doomed) }
+        // Land on the row that slid into the gap.
+        if workbook.sheet(sheet.id).map({ workbook.visibleRows(of: $0).isEmpty }) ?? true { selection = nil }
+        else { selection = Selection(cardID: s.cardID, anchor: CellRef(row: s.minRow, col: 0), focus: CellRef(row: s.minRow, col: 0), span: .rows); clampSelection() }
+        show("deleted \(doomed.count) row\(doomed.count == 1 ? "" : "s")")
+    }
+
+    func deleteSelectedColumns() {
+        guard let (s, sheet) = structuralSelection(.columns) else { return }
+        let doomed = Set(s.minCol...min(s.maxCol, sheet.columns.count - 1))
+        guard doomed.count < sheet.columns.count else { show("a sheet keeps at least one column"); return }
+        closeMenus()
+        var result: Workbook.ColumnDeletion?
+        mutate(doomed.count == 1 ? "Delete Column" : "Delete Columns") { wb in result = wb.deleteColumns(sheetID: sheet.id, columns: doomed) }
+        guard let r = result else { return }
+        if selectedCard == nil { selectedCardID = nil }
+        if fullscreenCard == nil { fullscreenCardID = nil }
+        selection = Selection(cardID: s.cardID, anchor: CellRef(row: 0, col: s.minCol), focus: CellRef(row: 0, col: s.minCol), span: .columns)
+        clampSelection()
+        let what = r.names.count == 1 ? r.names[0] : "\(r.names.count) columns"
+        show("deleted \(what)" + (r.removedViews > 0 ? " · removed \(r.removedViews) view\(r.removedViews == 1 ? "" : "s") built on \(r.names.count == 1 ? "it" : "them")" : ""))
     }
 
     // MARK: Views
@@ -334,7 +471,7 @@ final class AppState: ObservableObject {
         let card = Card(kind: cardKind, origin: CGPoint(x: gridCard.origin.x + gridWidth + 48, y: y))
         mutate("Insert \(kind)") { wb in wb.canvases[self.canvasIndex].cards.append(card) }
         selectedCardID = card.id
-        columnMenu = nil
+        closeMenus()
         paletteOpen = false
         show("\(kind) inserted — formula-backed, live")
     }
@@ -342,6 +479,16 @@ final class AppState: ObservableObject {
     func removeCard(_ id: UUID) {
         mutate("Remove View") { wb in wb.canvases[self.canvasIndex].cards.removeAll { $0.id == id && !$0.kind.isGrid } }
         if selectedCardID == id { selectedCardID = nil }
+        if fullscreenCardID == id { fullscreenCardID = nil }
+    }
+
+    /// Makes a view fill the canvas area (not the screen), or puts it back on the canvas.
+    func toggleFullscreen(_ id: UUID) {
+        if fullscreenCard?.id == id { fullscreenCardID = nil; return }
+        guard let card = canvas.cards.first(where: { $0.id == id }), !card.kind.isGrid else { return }
+        closeMenus()
+        if selectedCardID != id { selectedCardID = nil }   // another view's panel would cover this one
+        fullscreenCardID = id
     }
 
     func duplicateCard(_ id: UUID) {
@@ -366,8 +513,15 @@ final class AppState: ObservableObject {
 
     func pickCanvas(_ i: Int) {
         guard workbook.canvases.indices.contains(i), i != canvasIndex else { return }
-        selection = nil; columnMenu = nil; selectedCardID = nil
+        selection = nil; closeMenus(); selectedCardID = nil; fullscreenCardID = nil
         canvasIndex = i
+    }
+
+    /// Moves `delta` canvases left (negative) or right, wrapping at either end.
+    func stepCanvas(_ delta: Int) {
+        let n = workbook.canvases.count
+        guard n > 1 else { return }
+        pickCanvas(((canvasIndex + delta) % n + n) % n)
     }
 
     func newCanvas() {

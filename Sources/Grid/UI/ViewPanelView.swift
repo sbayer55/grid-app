@@ -14,6 +14,12 @@ struct ViewPanelView: View {
                     Text(title).font(Theme.uiFont(13, weight: .bold)).foregroundStyle(theme.bright.swiftUI)
                     Text("formula-backed").font(Theme.uiFont(10.5)).foregroundStyle(theme.subtext.swiftUI)
                     Spacer()
+                    Button { state.toggleFullscreen(card.id) } label: {
+                        Image(systemName: state.fullscreenCardID == card.id ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10, weight: .bold)).frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(theme.subtext.swiftUI)
+                    .help(state.fullscreenCardID == card.id ? "Exit full screen (esc)" : "Fill the canvas (⇧⌘F)")
                     Button { state.selectedCardID = nil } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).frame(width: 22, height: 22) }
                         .buttonStyle(.plain).foregroundStyle(theme.subtext.swiftUI)
                 }
