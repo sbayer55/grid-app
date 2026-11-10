@@ -121,6 +121,8 @@ struct WindowConfigurator: NSViewRepresentable {
     func updateNSView(_ v: NSView, context: Context) { DispatchQueue.main.async { configure(v.window) } }
     private func configure(_ window: NSWindow?) {
         guard let w = window else { return }
+        AppDelegate.mainWindow = w
+        w.isReleasedWhenClosed = false   // closing only hides it; AppDelegate re-shows it on activation
         w.title = title
         w.titleVisibility = .hidden
         w.titlebarAppearsTransparent = true

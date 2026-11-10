@@ -1,7 +1,30 @@
 import SwiftUI
+import AppKit
+
+/// Keeps the one main window reachable: switching to Grid (⌘Tab, Dock click) always brings it forward,
+/// even if it was minimized or closed. The workbook lives in `AppState.shared`, so a re-shown window loses nothing.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set by `WindowConfigurator` once the SwiftUI window exists.
+    static var mainWindow: NSWindow?
+
+    func applicationDidBecomeActive(_ notification: Notification) { Self.showMainWindow() }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        Self.showMainWindow()
+        return false   // we re-show the existing window; don't let the scene open a second one
+    }
+
+    static func showMainWindow() {
+        guard NSApp.modalWindow == nil,
+              let w = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain }) else { return }
+        if w.isMiniaturized { w.deminiaturize(nil) }
+        if !w.isVisible || !w.isKeyWindow, w.attachedSheet == nil { w.makeKeyAndOrderFront(nil) }
+    }
+}
 
 @main
 struct GridApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var state = AppState.shared
 
     var body: some Scene {
