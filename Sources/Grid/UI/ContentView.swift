@@ -53,9 +53,6 @@ struct ContentView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                     .zIndex(25)
             }
-            ZoomControls()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(16)
             if let toast = state.toast {
                 ToastView(text: toast.text)
                     .id(toast.id)
@@ -128,6 +125,7 @@ struct WindowConfigurator: NSViewRepresentable {
 
 // MARK: - Small overlay pieces
 
+/// Fit and zoom, sized to sit at the right end of the status bar.
 struct ZoomControls: View {
     @EnvironmentObject var state: AppState
     var body: some View {
@@ -136,18 +134,19 @@ struct ZoomControls: View {
             Button { state.fit() } label: {
                 HStack(spacing: 8) { Text("fit"); KeyCap("⌘0") }
             }
-            .buttonStyle(ChipStyle(theme: theme))
+            .buttonStyle(ChipStyle(theme: theme, height: 22))
             HStack(spacing: 0) {
-                Button { state.zoom(to: state.canvas.zoom / 1.2) } label: { Image(systemName: "minus").frame(width: 28, height: 26) }
+                Button { state.zoom(to: state.canvas.zoom / 1.2) } label: { Image(systemName: "minus").frame(width: 26, height: 22).contentShape(Rectangle()) }
                     .buttonStyle(.plain)
                 Text("\(Int((state.canvas.zoom * 100).rounded()))%")
                     .font(Theme.uiFont(11, weight: .semibold)).frame(width: 46)
-                Button { state.zoom(to: state.canvas.zoom * 1.2) } label: { Image(systemName: "plus").frame(width: 28, height: 26) }
+                Button { state.zoom(to: state.canvas.zoom * 1.2) } label: { Image(systemName: "plus").frame(width: 26, height: 22).contentShape(Rectangle()) }
                     .buttonStyle(.plain)
             }
             .background(Capsule().fill(theme.mantle.swiftUI.opacity(0.9)))
             .overlay(Capsule().stroke(theme.lavender.swiftUI.opacity(0.22), lineWidth: 1))
         }
+        .foregroundStyle(theme.text.swiftUI)
     }
 }
 
@@ -183,12 +182,13 @@ struct KeyCap: View {
 struct ChipStyle: ButtonStyle {
     var theme: Theme
     var accent = false
+    var height: CGFloat = 26
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(Theme.uiFont(11, weight: accent ? .bold : .semibold))
             .foregroundStyle(accent ? theme.crust.swiftUI : theme.text.swiftUI)
             .padding(.leading, 10).padding(.trailing, 4)
-            .frame(height: 26)
+            .frame(height: height)
             .background(Capsule().fill(accent ? theme.accent.swiftUI : theme.mantle.swiftUI.opacity(0.96)))
             .overlay(Capsule().stroke(accent ? Color.clear : theme.text.swiftUI.opacity(0.2), lineWidth: 1))
             .opacity(configuration.isPressed ? 0.7 : 1)

@@ -90,7 +90,7 @@ struct TabBarView: View {
     }
 }
 
-/// Bottom status bar: sheet facts on the left, formula readout and selection stats on the right.
+/// Bottom status bar: sheet facts on the left, formula readout, selection stats and zoom controls on the right.
 struct StatusBarView: View {
     @EnvironmentObject var state: AppState
 
@@ -108,11 +108,11 @@ struct StatusBarView: View {
             Text("│").foregroundStyle(theme.surface1.swiftUI)
             Text(stats)
             Text("│").foregroundStyle(theme.surface1.swiftUI)
-            HStack(spacing: 4) { KeyCap("⌘"); KeyCap("K"); Text("run") }
+            ZoomControls()
         }
         .font(Theme.uiFont(11))
         .foregroundStyle(theme.subtext.swiftUI)
-        .padding(.horizontal, 14)
+        .padding(.leading, 14).padding(.trailing, 8)
         .frame(height: 28)
     }
 
