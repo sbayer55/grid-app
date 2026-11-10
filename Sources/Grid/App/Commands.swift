@@ -27,7 +27,7 @@ extension AppState {
             add("data", "add \(name) as next sort key") { self.sort(sheetID: s.id, column: c, ascending: true, additive: true) }
             if s.columns[c].type == .text {
                 add("data", "filter \(name) by values…", "⌘⇧L") {
-                    if let card = self.selection?.cardID { self.openColumnMenu(cardID: card, column: c, anchor: self.columnMenu?.anchor ?? CGPoint(x: 200, y: 60)) }
+                    if let card = self.selection?.cardID { self.openColumnMenu(cardID: card, column: c, anchor: self.columnMenu?.anchor ?? CGPoint(x: 200, y: 60), showFilter: true) }
                 }
             }
             add("sheet", "pin columns through \(Sheet.columnLetter(c))", "⌥P") { self.togglePin(sheetID: s.id, throughColumn: c) }
@@ -43,6 +43,16 @@ extension AppState {
             add("sheet", "pin header row") { self.setPins(sheetID: s.id, rows: 1, columns: nil) }
             add("sheet", "append row", "⌘⇧↩") { self.appendRow() }
             add("sheet", "append column") { self.appendColumn() }
+            if canInsertRows {
+                add("sheet", "insert row above") { self.insertRow(below: false) }
+                add("sheet", "insert row below") { self.insertRow(below: true) }
+            }
+            if canInsertColumns {
+                add("sheet", "insert column left") { self.insertColumn(right: false) }
+                add("sheet", "insert column right") { self.insertColumn(right: true) }
+            }
+            if canDeleteRows { add("sheet", "delete selected rows", "⌘⌫") { self.deleteSelectedRows() } }
+            if canDeleteColumns { add("sheet", "delete selected columns", "⌘⌫") { self.deleteSelectedColumns() } }
         }
         if canCopy {
             add("sheet", "copy selection", "⌘C") { self.copySelection() }
@@ -51,12 +61,21 @@ extension AppState {
         }
         add("view", "insert pivot from selection", "⌘⇧P") { self.insertView("pivot") }
         add("view", "insert chart from selection", "⌘⇧C") { self.insertView("chart") }
+        if let id = fullscreenCard?.id {
+            add("view", "exit full screen", "esc") { self.toggleFullscreen(id) }
+        } else if let id = selectedCardID {
+            add("view", "selected view full screen", "⌘⇧F") { self.toggleFullscreen(id) }
+        }
         if let id = selectedCardID {
             add("view", "duplicate selected view") { self.duplicateCard(id) }
             add("view", "remove selected view") { self.removeCard(id) }
         }
         for (i, c) in workbook.canvases.enumerated() {
             add("canvas", "go to canvas \(i + 1) · \(c.name)", i < 9 ? "⌘\(i + 1)" : "") { self.pickCanvas(i) }
+        }
+        if workbook.canvases.count > 1 {
+            add("canvas", "previous canvas", "⌘[") { self.stepCanvas(-1) }
+            add("canvas", "next canvas", "⌘]") { self.stepCanvas(1) }
         }
         add("canvas", "new canvas") { self.newCanvas() }
         add("canvas", "fit everything in view", "⌘0") { self.fit() }
@@ -87,7 +106,7 @@ extension AppState {
         paletteOpen.toggle()
         paletteQuery = ""
         paletteIndex = 0
-        columnMenu = nil
+        closeMenus()
         if !paletteOpen { focusCanvasRequest.send() }
     }
 }

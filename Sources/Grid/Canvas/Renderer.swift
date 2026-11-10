@@ -236,7 +236,20 @@ struct Renderer {
 
     // MARK: Pivot card
 
-    func drawPivot(_ l: Layout.CardLayout, cfg: PivotConfig, selected: Bool) {
+    /// Right end of a view card's header: status word, full screen toggle, remove.
+    /// Returns the x where it starts, so the title text to its left can stop short of it.
+    @discardableResult
+    func drawViewHeaderButtons(_ header: CGRect, selected: Bool, fullscreen: Bool, color: NSColor) -> CGFloat {
+        let tint = selected ? color : theme.subtext
+        let status = selected ? "editing" : "live"
+        draw(status, in: CGRect(x: header.minX, y: header.minY, width: header.width - Layout.headerButtonsWidth - 4, height: header.height), size: 11, color: tint, align: .right, inset: 0)
+        draw(fullscreen ? "⤡" : "⤢", in: CGRect(x: header.maxX - Layout.headerButtonsWidth, y: header.minY, width: Layout.headerButtonsWidth - 30, height: header.height), size: 13, color: fullscreen ? color : tint, align: .center, inset: 0)
+        draw("×", in: CGRect(x: header.minX, y: header.minY, width: header.width - 10, height: header.height), size: 11, color: tint, align: .right, inset: 0)
+        return header.maxX - Layout.headerButtonsWidth - 4 - width(of: status, size: 11) - 8
+    }
+
+    /// `scroll` moves the rows up under the column header (full screen pivots taller than the frame).
+    func drawPivot(_ l: Layout.CardLayout, cfg: PivotConfig, selected: Bool, fullscreen: Bool = false, scroll: CGFloat = 0) {
         guard let p = l.pivot, let sheet = l.sheet else { return }
         let f = l.frame
         drawCardChrome(f, colors: selected ? theme.borderGradient : [theme.accent, theme.pink], conic: selected, glow: selected ? theme.accent : nil)
@@ -246,43 +259,51 @@ struct Renderer {
         draw("pivot", in: CGRect(x: x, y: header.minY, width: 100, height: header.height), size: 11, weight: .bold, color: theme.accent, inset: 0)
         x += width(of: "pivot", size: 11, weight: .bold) + 8
         let sub = "\(sheet.name) · by \(cfg.rowField)" + (cfg.columnField.map { " × \($0)" } ?? "")
-        draw(sub, in: CGRect(x: x, y: header.minY, width: header.width - 120, height: header.height), size: 11, color: theme.subtext, inset: 0)
-        draw(selected ? "editing  ×" : "live  ×", in: CGRect(x: header.minX, y: header.minY, width: header.width - 10, height: header.height), size: 11, color: selected ? theme.accent : theme.subtext, align: .right, inset: 0)
+        let limit = drawViewHeaderButtons(header, selected: selected, fullscreen: fullscreen, color: theme.accent)
+        draw(sub, in: CGRect(x: x, y: header.minY, width: max(0, limit - x), height: header.height), size: 11, color: theme.subtext, inset: 0)
 
+        let m = Layout.pivotMetrics(p, totals: cfg.totals, frame: f.size)
+        let rowH = m.rowHeight, size = m.fontSize, inset = 10 * size / 12
         let showTotal = cfg.totals && p.columnHeaders.count > 1
         let top = f.minY + Layout.border + Layout.cardHeader
         let left = f.minX + Layout.border + 1
-        fill(CGRect(x: f.minX + Layout.border, y: top, width: f.width - Layout.border * 2, height: Layout.rowHeight), theme.crust.withAlphaComponent(0.5))
-        draw(p.rowField, in: CGRect(x: left, y: top, width: Layout.pivotLabelWidth, height: Layout.rowHeight), size: 12, weight: .bold, color: theme.bright, inset: 10)
+        let totalX = left + m.labelWidth + m.valueWidth * CGFloat(p.columnHeaders.count)
+        fill(CGRect(x: f.minX + Layout.border, y: top, width: f.width - Layout.border * 2, height: rowH), theme.crust.withAlphaComponent(0.5))
+        draw(p.rowField, in: CGRect(x: left, y: top, width: m.labelWidth, height: rowH), size: size, weight: .bold, color: theme.bright, inset: inset)
         for (i, h) in p.columnHeaders.enumerated() {
-            let r = CGRect(x: left + Layout.pivotLabelWidth + Layout.pivotValueWidth * CGFloat(i), y: top, width: Layout.pivotValueWidth, height: Layout.rowHeight)
-            draw(h, in: r, size: 12, weight: .bold, color: theme.color(forValue: h) ?? theme.bright, align: .right, inset: 10)
+            let r = CGRect(x: left + m.labelWidth + m.valueWidth * CGFloat(i), y: top, width: m.valueWidth, height: rowH)
+            draw(h, in: r, size: size, weight: .bold, color: theme.color(forValue: h) ?? theme.bright, align: .right, inset: inset)
         }
         if showTotal {
-            draw("Total", in: CGRect(x: left + Layout.pivotLabelWidth + Layout.pivotValueWidth * CGFloat(p.columnHeaders.count), y: top, width: Layout.pivotTotalWidth, height: Layout.rowHeight), size: 12, weight: .bold, color: theme.bright, align: .right, inset: 10)
+            draw("Total", in: CGRect(x: totalX, y: top, width: m.totalWidth, height: rowH), size: size, weight: .bold, color: theme.bright, align: .right, inset: inset)
         }
         let lineColor = theme.text.withAlphaComponent(0.08)
+        // Rows clip to the card body so a scrolled table stays under its header and inside the ring.
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: f.minX + Layout.border, y: top + rowH, width: f.width - Layout.border * 2, height: max(0, f.maxY - Layout.border - top - rowH)))
         for (i, row) in p.rows.enumerated() {
-            let y = top + Layout.rowHeight * CGFloat(i + 1)
-            let rowRect = CGRect(x: f.minX + Layout.border, y: y, width: f.width - Layout.border * 2, height: Layout.rowHeight)
+            let y = top + rowH * CGFloat(i + 1) - scroll
+            guard y + rowH > top + rowH, y < f.maxY else { continue }
+            let rowRect = CGRect(x: f.minX + Layout.border, y: y, width: f.width - Layout.border * 2, height: rowH)
             if row.isTotal { fill(rowRect, theme.surface0.withAlphaComponent(0.5)) }
             let w: NSFont.Weight = row.isTotal ? .bold : .regular
             let c = row.isTotal ? theme.bright : theme.text
-            draw(row.label, in: CGRect(x: left, y: y, width: Layout.pivotLabelWidth, height: Layout.rowHeight), size: 12, weight: w, color: c, inset: 10)
+            draw(row.label, in: CGRect(x: left, y: y, width: m.labelWidth, height: rowH), size: size, weight: w, color: c, inset: inset)
             for (j, v) in row.values.enumerated() {
-                let r = CGRect(x: left + Layout.pivotLabelWidth + Layout.pivotValueWidth * CGFloat(j), y: y, width: Layout.pivotValueWidth, height: Layout.rowHeight)
-                draw(v == 0 && !row.isTotal && p.columnHeaders.count > 1 ? "–" : p.format(v), in: r, size: 12, weight: w, color: c, align: .right, inset: 10)
+                let r = CGRect(x: left + m.labelWidth + m.valueWidth * CGFloat(j), y: y, width: m.valueWidth, height: rowH)
+                draw(v == 0 && !row.isTotal && p.columnHeaders.count > 1 ? "–" : p.format(v), in: r, size: size, weight: w, color: c, align: .right, inset: inset)
             }
             if showTotal {
-                draw(p.format(row.total), in: CGRect(x: left + Layout.pivotLabelWidth + Layout.pivotValueWidth * CGFloat(p.columnHeaders.count), y: y, width: Layout.pivotTotalWidth, height: Layout.rowHeight), size: 12, weight: .bold, color: theme.bright, align: .right, inset: 10)
+                draw(p.format(row.total), in: CGRect(x: totalX, y: y, width: m.totalWidth, height: rowH), size: size, weight: .bold, color: theme.bright, align: .right, inset: inset)
             }
             line(from: CGPoint(x: rowRect.minX, y: rowRect.maxY), to: CGPoint(x: rowRect.maxX, y: rowRect.maxY), color: lineColor)
         }
+        ctx.restoreGState()
     }
 
     // MARK: Chart card
 
-    func drawChart(_ l: Layout.CardLayout, cfg: ChartConfig, selected: Bool) {
+    func drawChart(_ l: Layout.CardLayout, cfg: ChartConfig, selected: Bool, fullscreen: Bool = false) {
         guard let ch = l.chart, let sheet = l.sheet else { return }
         let f = l.frame
         drawCardChrome(f, colors: selected ? theme.borderGradient : [theme.teal, theme.blue], conic: selected, glow: selected ? theme.teal : nil)
@@ -291,35 +312,42 @@ struct Renderer {
         var x = header.minX + 10
         draw("chart", in: CGRect(x: x, y: header.minY, width: 100, height: header.height), size: 11, weight: .bold, color: theme.teal, inset: 0)
         x += width(of: "chart", size: 11, weight: .bold) + 8
-        draw("\(sheet.name) · \(cfg.type.rawValue)", in: CGRect(x: x, y: header.minY, width: 200, height: header.height), size: 11, color: theme.subtext, inset: 0)
-        draw(selected ? "editing  ×" : "live  ×", in: CGRect(x: header.minX, y: header.minY, width: header.width - 10, height: header.height), size: 11, color: selected ? theme.teal : theme.subtext, align: .right, inset: 0)
+        let limit = drawViewHeaderButtons(header, selected: selected, fullscreen: fullscreen, color: theme.teal)
+        draw("\(sheet.name) · \(cfg.type.rawValue)", in: CGRect(x: x, y: header.minY, width: max(0, limit - x), height: header.height), size: 11, color: theme.subtext, inset: 0)
+
+        // Everything below scales with the frame: `k` is 1 on the canvas and grows in full screen.
+        let k = Layout.chartScale(frame: f.size)
+        let fs = min(k, 1.5)                                   // text grows less than the marks
 
         // Title + legend
-        let titleY = f.minY + Layout.border + Layout.cardHeader + 8
+        let titleY = f.minY + Layout.border + Layout.cardHeader + 8 * fs
+        let titleH = 18 * fs
         let title = "\(cfg.yField) by \(cfg.xField)" + (cfg.seriesField.map { " · by \($0)" } ?? "")
-        draw(title, in: CGRect(x: f.minX + 16, y: titleY, width: f.width - 32, height: 18), size: 12, weight: .bold, color: theme.bright, inset: 0)
+        draw(title, in: CGRect(x: f.minX + 16, y: titleY, width: f.width - 32, height: titleH), size: 12 * fs, weight: .bold, color: theme.bright, inset: 0)
         if !ch.series.isEmpty {
             var lx = f.maxX - 16
             for (i, s) in ch.series.enumerated().reversed() {
-                let w = width(of: s, size: 10) + 16
+                let w = width(of: s, size: 10 * fs) + 16 * fs
                 lx -= w
-                fillRounded(CGRect(x: lx, y: titleY + 4, width: 9, height: 9), radius: 3, theme.series[i % theme.series.count])
-                draw(s, in: CGRect(x: lx + 12, y: titleY, width: w, height: 18), size: 10, color: theme.text, inset: 0)
-                lx -= 10
+                fillRounded(CGRect(x: lx, y: titleY + (titleH - 9 * fs) / 2, width: 9 * fs, height: 9 * fs), radius: 3 * fs, theme.series[i % theme.series.count])
+                draw(s, in: CGRect(x: lx + 12 * fs, y: titleY, width: w, height: titleH), size: 10 * fs, color: theme.text, inset: 0)
+                lx -= 10 * fs
             }
         }
 
-        let plot = CGRect(x: f.minX + 16, y: titleY + 28, width: f.width - 32, height: f.maxY - (titleY + 28) - 14)
+        let plotTop = titleY + titleH + 10 * fs
+        let plot = CGRect(x: f.minX + 16, y: plotTop, width: f.width - 32, height: f.maxY - plotTop - 14)
         if cfg.type == .bar {
-            let rowH = min(26, plot.height / CGFloat(max(1, ch.bars.count)))
+            let rowH = min(26 * k, plot.height / CGFloat(max(1, ch.bars.count)))
             let startY = plot.minY + (plot.height - rowH * CGFloat(ch.bars.count)) / 2
+            let labelW = 64 * fs, valueW = 76 * fs, trackH = min(14 * k, rowH * 0.6)
             for (i, bar) in ch.bars.enumerated() {
                 let y = startY + rowH * CGFloat(i)
-                draw(bar.label, in: CGRect(x: plot.minX, y: y, width: 64, height: rowH), size: 11, color: theme.text, inset: 0)
-                let track = CGRect(x: plot.minX + 74, y: y + (rowH - 14) / 2, width: plot.width - 74 - (cfg.valueLabels ? 78 : 0), height: 14)
-                fillRounded(track, radius: 7, theme.surface1.withAlphaComponent(0.5))
+                draw(bar.label, in: CGRect(x: plot.minX, y: y, width: labelW, height: rowH), size: 11 * fs, color: theme.text, inset: 0)
+                let track = CGRect(x: plot.minX + labelW + 10, y: y + (rowH - trackH) / 2, width: plot.width - labelW - 10 - (cfg.valueLabels ? valueW + 2 : 0), height: trackH)
+                fillRounded(track, radius: trackH / 2, theme.surface1.withAlphaComponent(0.5))
                 ctx.saveGState()
-                ctx.addPath(roundedPath(track, radius: 7)); ctx.clip()
+                ctx.addPath(roundedPath(track, radius: trackH / 2)); ctx.clip()
                 var sx = track.minX
                 for seg in bar.segments {
                     let w = track.width * CGFloat(seg.value / ch.maxValue)
@@ -327,18 +355,18 @@ struct Renderer {
                     sx += w
                 }
                 ctx.restoreGState()
-                if cfg.valueLabels { draw(ch.format(bar.total), in: CGRect(x: plot.maxX - 76, y: y, width: 76, height: rowH), size: 11, color: theme.subtext, align: .right, inset: 0) }
+                if cfg.valueLabels { draw(ch.format(bar.total), in: CGRect(x: plot.maxX - valueW, y: y, width: valueW, height: rowH), size: 11 * fs, color: theme.subtext, align: .right, inset: 0) }
             }
         } else {
-            let axisY = plot.maxY - 18
-            let area = CGRect(x: plot.minX, y: plot.minY + 14, width: plot.width, height: axisY - plot.minY - 14)
+            let axisY = plot.maxY - 18 * fs
+            let area = CGRect(x: plot.minX, y: plot.minY + 14 * fs, width: plot.width, height: axisY - plot.minY - 14 * fs)
             for i in 0...4 {
                 let y = area.minY + area.height * CGFloat(i) / 4
                 line(from: CGPoint(x: area.minX, y: y), to: CGPoint(x: area.maxX, y: y), color: theme.text.withAlphaComponent(0.07))
             }
             line(from: CGPoint(x: area.minX, y: axisY), to: CGPoint(x: area.maxX, y: axisY), color: theme.text.withAlphaComponent(0.18))
             let slot = area.width / CGFloat(max(1, ch.bars.count))
-            let barW = min(44, slot * 0.6)
+            let barW = min(44 * k, slot * 0.6)
             for (i, bar) in ch.bars.enumerated() {
                 let cx = area.minX + slot * (CGFloat(i) + 0.5)
                 var y = axisY
@@ -348,8 +376,8 @@ struct Renderer {
                     line(from: CGPoint(x: cx - barW / 2, y: y - h), to: CGPoint(x: cx + barW / 2, y: y - h), color: theme.mantle.withAlphaComponent(0.6))
                     y -= h
                 }
-                if cfg.valueLabels { draw(ch.format(bar.total), in: CGRect(x: cx - slot / 2, y: y - 16, width: slot, height: 14), size: 9.5, color: theme.text, align: .center, inset: 0) }
-                draw(bar.label, in: CGRect(x: cx - slot / 2, y: axisY + 2, width: slot, height: 16), size: 10, color: theme.text, align: .center, inset: 2)
+                if cfg.valueLabels { draw(ch.format(bar.total), in: CGRect(x: cx - slot / 2, y: y - 16 * fs, width: slot, height: 14 * fs), size: 9.5 * fs, color: theme.text, align: .center, inset: 0) }
+                draw(bar.label, in: CGRect(x: cx - slot / 2, y: axisY + 2, width: slot, height: 16 * fs), size: 10 * fs, color: theme.text, align: .center, inset: 2)
             }
         }
     }

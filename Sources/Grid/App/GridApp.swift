@@ -55,6 +55,16 @@ struct GridApp: App {
                 Divider()
                 Button("Append Row") { state.appendRow() }.keyboardShortcut(.return, modifiers: [.command, .shift])
                 Button("Append Column") { state.appendColumn() }
+                Divider()
+                // ⌘⌫ is handled by the canvas, not as a key equivalent here: a menu shortcut would
+                // take the keystroke away from the cell editor, where it deletes to the line start.
+                Button("Insert Row Above") { state.insertRow(below: false) }.disabled(!state.canInsertRows)
+                Button("Insert Row Below") { state.insertRow(below: true) }.disabled(!state.canInsertRows)
+                Button("Insert Column Left") { state.insertColumn(right: false) }.disabled(!state.canInsertColumns)
+                Button("Insert Column Right") { state.insertColumn(right: true) }.disabled(!state.canInsertColumns)
+                Divider()
+                Button("Delete Selected Rows") { state.deleteSelectedRows() }.disabled(!state.canDeleteRows)
+                Button("Delete Selected Columns") { state.deleteSelectedColumns() }.disabled(!state.canDeleteColumns)
             }
             CommandMenu("Go") {
                 ForEach(Array(state.workbook.canvases.enumerated()), id: \.element.id) { i, c in
@@ -65,6 +75,9 @@ struct GridApp: App {
                     }
                 }
                 Divider()
+                Button("Previous Canvas") { state.stepCanvas(-1) }.keyboardShortcut("[", modifiers: .command)
+                Button("Next Canvas") { state.stepCanvas(1) }.keyboardShortcut("]", modifiers: .command)
+                Divider()
                 Button("New Canvas") { state.newCanvas() }.keyboardShortcut("t", modifiers: .command)
             }
             CommandMenu("View") {
@@ -74,6 +87,13 @@ struct GridApp: App {
                 Button("Zoom In") { state.zoom(to: state.canvas.zoom * 1.2) }.keyboardShortcut("=", modifiers: .command)
                 Button("Zoom Out") { state.zoom(to: state.canvas.zoom / 1.2) }.keyboardShortcut("-", modifiers: .command)
                 Button("Actual Size") { state.zoom(to: 1) }
+                Divider()
+                // Fills the canvas area only; the window's own full screen is untouched.
+                Button(state.fullscreenCard != nil ? "Exit View Full Screen" : "View Full Screen") {
+                    if let id = state.fullscreenCard?.id ?? state.selectedCardID { state.toggleFullscreen(id) }
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(state.fullscreenCard == nil && state.selectedCard == nil)
                 Divider()
                 Button("Reload Theme") { state.theme = Theme.load(); state.show("theme: \(state.theme.name)") }
             }
@@ -87,6 +107,6 @@ struct GridApp: App {
 
     private func filterSelected() {
         guard let s = state.selection else { return }
-        state.openColumnMenu(cardID: s.cardID, column: s.anchor.col, anchor: CGPoint(x: 240, y: 60))
+        state.openColumnMenu(cardID: s.cardID, column: s.anchor.col, anchor: state.columnMenu?.anchor ?? CGPoint(x: 240, y: 60), showFilter: true)
     }
 }

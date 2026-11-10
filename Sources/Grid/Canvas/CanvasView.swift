@@ -11,6 +11,7 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var phase: CGFloat = 0
     private var timer: Timer?
     private var selecting = false
+    private var selectingRows = false
     private var editor: NSTextField?
     private var editingCell: (cardID: UUID, ref: CellRef)?
     private var viewportTransition: (from: (CGPoint, CGFloat), to: (CGPoint, CGFloat), start: TimeInterval)?
@@ -45,6 +46,9 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             .store(in: &cancellables)
         state.animateViewportRequest
             .sink { [weak self] in self?.startViewportTransition() }
+            .store(in: &cancellables)
+        state.$fullscreenCardID
+            .sink { [weak self] _ in self?.fullscreenScroll = 0; self?.commitEditing() }
             .store(in: &cancellables)
         NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)
             .sink { [weak self] note in
@@ -118,8 +122,16 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: Coordinates
 
-    private var pan: CGPoint { state.canvas.pan }
-    private var zoom: CGFloat { state.canvas.zoom }
+    /// A full screen view is drawn straight in viewport units; the canvas keeps its own pan
+    /// and zoom untouched underneath, so leaving full screen returns to the same place.
+    private var fullscreen: (id: UUID, frame: CGRect)? {
+        guard let card = state.fullscreenCard else { return nil }
+        return (card.id, Layout.fullscreenFrame(viewport: bounds.size, panelOpen: state.selectedCardID == card.id))
+    }
+    /// Rows scrolled off the top of a full screen pivot that is taller than the viewport.
+    private var fullscreenScroll: CGFloat = 0
+    private var pan: CGPoint { state.fullscreenCard != nil ? .zero : state.canvas.pan }
+    private var zoom: CGFloat { state.fullscreenCard != nil ? 1 : state.canvas.zoom }
     private func toWorld(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - pan.x) / zoom, y: (p.y - pan.y) / zoom) }
     private func toView(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * zoom + pan.x, y: p.y * zoom + pan.y) }
 
@@ -131,9 +143,11 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         advanceViewportTransition()
         let pan = self.pan, zoom = self.zoom
 
+        let fullscreen = self.fullscreen
+
         // Dot grid (viewport space)
         let spacing = 22 * zoom
-        if spacing > 6 {
+        if spacing > 6, fullscreen == nil {
             ctx.setFillColor(theme.text.withAlphaComponent(0.14).cgColor)
             let ox = pan.x.truncatingRemainder(dividingBy: spacing), oy = pan.y.truncatingRemainder(dividingBy: spacing)
             var y = oy
@@ -148,7 +162,12 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         ctx.translateBy(x: pan.x, y: pan.y)
         ctx.scaleBy(x: zoom, y: zoom)
 
-        layouts = Layout.layouts(canvas: state.canvas, workbook: state.workbook)
+        layouts = Layout.layouts(canvas: state.canvas, workbook: state.workbook, fullscreen: fullscreen)
+        if let l = layouts.first, fullscreen != nil, let p = l.pivot, case .pivot(let cfg) = l.card.kind {
+            fullscreenScroll = max(0, min(fullscreenScroll, Layout.pivotMetrics(p, totals: cfg.totals, frame: l.frame.size).maxScroll))
+        } else {
+            fullscreenScroll = 0
+        }
         let r = Renderer(ctx: ctx, theme: theme, zoom: zoom, phase: phase)
 
         // Links from the grid to each view card
@@ -167,9 +186,9 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 let editing = editingCell.flatMap { $0.cardID == l.card.id ? $0.ref : nil }
                 r.drawGrid(l, state: Renderer.GridState(selection: state.selection, editing: editing, hasSelection: state.selection?.cardID == l.card.id))
             case .pivot(let cfg):
-                r.drawPivot(l, cfg: cfg, selected: state.selectedCardID == l.card.id)
+                r.drawPivot(l, cfg: cfg, selected: state.selectedCardID == l.card.id, fullscreen: fullscreen != nil, scroll: fullscreenScroll)
             case .chart(let cfg):
-                r.drawChart(l, cfg: cfg, selected: state.selectedCardID == l.card.id)
+                r.drawChart(l, cfg: cfg, selected: state.selectedCardID == l.card.id, fullscreen: fullscreen != nil)
             }
         }
         ctx.restoreGState()
@@ -282,7 +301,10 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if let l = layouts.first(where: { $0.card.id == id }) {
                 drag = .card(id: id, start: p, origin: l.frame.origin, moved: false)
             }
-            state.columnMenu = nil
+            state.closeMenus()
+        case .toggleFullscreen(let id):
+            commitEditing()
+            state.toggleFullscreen(id)
         case .removeView(let id):
             commitEditing()
             state.removeCard(id)
@@ -290,14 +312,15 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             commitEditing()
             if let l = layouts.first(where: { $0.card.id == id }) {
                 let anchor = toView(CGPoint(x: l.frame.minX + l.columnX(c), y: l.frame.minY + l.rowY(0)))
-                state.openColumnMenu(cardID: id, column: c, anchor: anchor)
+                state.openColumnMenu(cardID: id, column: c, anchor: anchor, extend: event.modifierFlags.contains(.shift))
             }
         case .rowNumber(let id, let r):
             commitEditing()
-            if let sheet = state.sheet(for: id) {
-                state.select(card: id, row: r, col: 0, extend: false)
-                state.selection?.focus = CellRef(row: r, col: max(0, sheet.columns.count - 1))
-                state.selectedCardID = nil
+            if let l = layouts.first(where: { $0.card.id == id }) {
+                // Beside the gutter, just under the row, so the row itself stays readable.
+                let anchor = toView(CGPoint(x: l.frame.minX + Layout.border + Layout.gutter, y: l.frame.minY + l.rowY(r + 1)))
+                state.openRowMenu(cardID: id, row: r, anchor: anchor, extend: event.modifierFlags.contains(.shift))
+                selectingRows = true
             }
         case .cell(let id, let row, let col):
             if let e = editingCell, e.cardID == id, e.ref == CellRef(row: row, col: col) { return }
@@ -314,11 +337,12 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if state.gridCard?.id == id { state.appendColumn() }
         case .cardBody:
             commitEditing()
-            state.columnMenu = nil
+            state.closeMenus()
         case .empty:
             commitEditing()
             state.selection = nil
-            state.columnMenu = nil
+            state.closeMenus()
+            guard state.fullscreenCard == nil else { return }   // nothing to pan behind a full screen view
             drag = .pan(start: p, origin: pan)
             NSCursor.closedHand.push()
         }
@@ -331,12 +355,21 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             state.updateCanvas { c in c.pan = CGPoint(x: origin.x + p.x - start.x, y: origin.y + p.y - start.y) }
             needsDisplay = true
         case .card(let id, let start, let origin, _):
+            guard state.fullscreenCard == nil else { return }   // a full screen view stays put; a click still selects it
             let o = CGPoint(x: origin.x + (p.x - start.x) / zoom, y: origin.y + (p.y - start.y) / zoom)
             drag = .card(id: id, start: start, origin: origin, moved: true)
             state.moveCard(id, to: o)
         case .none:
-            if selecting, case .cell(let id, let row, let col) = Layout.hit(toWorld(p), layouts: layouts), state.selection?.cardID == id {
+            let hit = Layout.hit(toWorld(p), layouts: layouts)
+            if selecting, case .cell(let id, let row, let col) = hit, state.selection?.cardID == id {
                 state.selection?.focus = CellRef(row: row, col: col)
+            }
+            if selectingRows, let s = state.selection, s.span == .rows {
+                // Dragging down the row numbers (or across the rows themselves) grows the row selection.
+                var row: Int?
+                if case .rowNumber(let id, let r) = hit, id == s.cardID { row = r }
+                if case .cell(let id, let r, _) = hit, id == s.cardID { row = r }
+                if let r = row, r != s.focus.row { state.selectRows(card: s.cardID, row: r, extend: true) }
             }
         }
     }
@@ -344,14 +377,20 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     override func mouseUp(with event: NSEvent) {
         if case .card(let id, _, _, let moved) = drag, !moved, let card = state.canvas.cards.first(where: { $0.id == id }), !card.kind.isGrid {
             state.selectedCardID = id
-            state.columnMenu = nil
+            state.closeMenus()
         }
         if case .pan = drag { NSCursor.pop() }
         drag = nil
         selecting = false
+        selectingRows = false
     }
 
     override func scrollWheel(with event: NSEvent) {
+        if state.fullscreenCard != nil {
+            fullscreenScroll -= event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 8)   // clamped in draw()
+            needsDisplay = true
+            return
+        }
         viewportTransition = nil
         let p = convert(event.locationInWindow, from: nil)
         if event.modifierFlags.contains(.command) {
@@ -365,6 +404,7 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     override func magnify(with event: NSEvent) {
+        guard state.fullscreenCard == nil else { return }
         viewportTransition = nil
         let p = convert(event.locationInWindow, from: nil)
         state.zoom(to: zoom * (1 + event.magnification), around: p)
@@ -381,10 +421,17 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
         switch code {
         case 53: // esc
-            if state.columnMenu != nil { state.columnMenu = nil }
+            if state.columnMenu != nil || state.rowMenu != nil { state.closeMenus() }
+            else if state.fullscreenCard != nil { state.fullscreenCardID = nil }
             else if state.selectedCardID != nil { state.selectedCardID = nil }
             else { state.selection = nil }
             return
+        default: break
+        }
+        // The grid is hidden behind a full screen view: don't move, edit or clear its selection blind.
+        if state.fullscreenCard != nil { super.keyDown(with: event); return }
+
+        switch code {
         case 126, 125, 123, 124: // ↑ ↓ ← →
             if cmd && (code == 126 || code == 125), let s = state.selection, let sheet = state.sheet(for: s.cardID) {
                 state.sort(sheetID: sheet.id, column: s.anchor.col, ascending: code == 126)
@@ -401,7 +448,9 @@ final class CanvasView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if cmd && shift { state.appendRow(); return }
             beginEditing(initial: nil)
             return
-        case 51, 117: // delete / forward delete
+        case 51, 117: // delete / forward delete; with ⌘, whole rows or columns are removed
+            if cmd && code == 51, state.deleteSelection() { return }
+            state.closeMenus()
             state.clearSelection()
             return
         default: break
