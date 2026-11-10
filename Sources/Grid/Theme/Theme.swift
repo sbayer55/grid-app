@@ -89,6 +89,22 @@ extension Theme {
 
     /// JetBrains Mono if installed, otherwise the system monospaced font.
     static func font(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        // The renderer asks for a font per text run; looking one up by name each time is the
+        // single largest cost of a redraw, so resolved fonts are kept.
+        let key = FontKey(size: size, weight: weight.rawValue)
+        fontLock.lock(); defer { fontLock.unlock() }
+        if let f = fontCache[key] { return f }
+        if fontCache.count > 64 { fontCache.removeAll() }   // zooming asks for many one-off sizes
+        let f = resolveFont(size, weight: weight)
+        fontCache[key] = f
+        return f
+    }
+
+    private struct FontKey: Hashable { let size: CGFloat; let weight: CGFloat }
+    private static var fontCache: [FontKey: NSFont] = [:]
+    private static let fontLock = NSLock()
+
+    private static func resolveFont(_ size: CGFloat, weight: NSFont.Weight) -> NSFont {
         let name: String
         switch weight {
         case .bold, .heavy, .black: name = "JetBrainsMono-Bold"

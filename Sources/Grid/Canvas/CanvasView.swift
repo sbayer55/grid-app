@@ -14,6 +14,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private var editor: NSTextField?
     private var editingCell: (cardID: UUID, ref: CellRef)?
     private var viewportTransition: (from: (CGPoint, CGFloat), to: (CGPoint, CGFloat), start: TimeInterval)?
+    private let overlay = OverlayView()
+    private let pulseLayer = CAShapeLayer()
+    private static let pulseKey = "pulse"
+
+    /// Hosts Core Animation layers above the drawn canvas; never takes mouse events.
+    private final class OverlayView: NSView {
+        override var isFlipped: Bool { true }   // AppKit flips the hosted layer to match: y down, like the canvas
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
 
     private enum Drag {
         case pan(start: CGPoint, origin: CGPoint)
@@ -37,18 +46,57 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         state.animateViewportRequest
             .sink { [weak self] in self?.startViewportTransition() }
             .store(in: &cancellables)
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if self.state.theme.animateBorders || self.state.selection != nil || self.viewportTransition != nil {
-                self.phase += 0.025
-                if self.phase > .pi * 2 { self.phase -= .pi * 2 }
+        NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)
+            .sink { [weak self] note in
+                guard let self = self, (note.object as? NSWindow) === self.window else { return }
                 self.needsDisplay = true
+                self.syncTimer()
             }
-        }
+            .store(in: &cancellables)
+
+        let root = CALayer()
+        root.masksToBounds = true
+        overlay.layer = root
+        overlay.wantsLayer = true
+        addSubview(overlay)
+        pulseLayer.fillColor = nil
+        pulseLayer.shadowOffset = .zero
+        pulseLayer.isHidden = true
+        root.addSublayer(pulseLayer)
     }
 
     required init?(coder: NSCoder) { fatalError() }
     deinit { timer?.invalidate() }
+
+    // MARK: Frame timer
+
+    /// Only the conic ring of a selected view card and the fit/zoom transition are redrawn
+    /// frame by frame. Everything else is static, so the timer runs only while one of them is
+    /// on screen; an idle canvas does not redraw at all.
+    private var needsFrames: Bool {
+        guard window?.occlusionState.contains(.visible) == true else { return false }
+        if viewportTransition != nil { return true }
+        return state.theme.animateBorders && state.selectedCardID != nil
+    }
+
+    private func syncTimer() {
+        if needsFrames {
+            guard timer == nil else { return }
+            let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                guard self.needsFrames else { self.syncTimer(); return }
+                self.phase += 0.025
+                if self.phase > .pi * 2 { self.phase -= .pi * 2 }
+                self.needsDisplay = true
+            }
+            t.tolerance = 0.005
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -57,10 +105,13 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        needsDisplay = true
+        syncTimer()
     }
 
     override func layout() {
         super.layout()
+        overlay.frame = bounds
         let size = bounds.size
         if state.viewportSize != size { DispatchQueue.main.async { self.state.viewportSize = size } }
     }
@@ -123,6 +174,73 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         }
         ctx.restoreGState()
         positionEditor()
+        updatePulse()
+        syncTimer()
+    }
+
+    // MARK: Current-cell ring
+
+    /// The pulsing ring around the current cell. It is a layer with a repeating Core Animation
+    /// glow, so it costs the app nothing while a cell just sits selected.
+    private func updatePulse() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard editingCell == nil, let s = state.selection,
+              let index = layouts.firstIndex(where: { $0.card.id == s.cardID }),
+              let sheet = layouts[index].sheet,
+              s.anchor.row < layouts[index].rows.count, s.anchor.col < sheet.columns.count else {
+            pulseLayer.isHidden = true
+            pulseLayer.removeAnimation(forKey: Self.pulseKey)
+            return
+        }
+        let l = layouts[index]
+        let origin = toView(CGPoint(x: l.frame.minX + l.columnX(s.anchor.col), y: l.frame.minY + l.rowY(s.anchor.row)))
+        let cell = CGRect(x: origin.x, y: origin.y, width: sheet.columns[s.anchor.col].width * zoom, height: Layout.rowHeight * zoom)
+        let accent = state.theme.accent.cgColor
+        pulseLayer.frame = bounds
+        pulseLayer.path = CGPath(rect: cell.insetBy(dx: zoom, dy: zoom), transform: nil)
+        pulseLayer.lineWidth = 2 * zoom
+        pulseLayer.strokeColor = accent
+        pulseLayer.shadowColor = accent
+        pulseLayer.shadowRadius = 9
+        pulseLayer.shadowOpacity = 0.6
+        pulseLayer.isHidden = false
+
+        // Cards drawn after this one sit on top of it; keep the ring underneath them.
+        let glow = cell.insetBy(dx: -40, dy: -40)
+        var visible: CGPath?
+        for later in layouts[(index + 1)...] {
+            let o = toView(later.frame.origin)
+            let frame = CGRect(x: o.x, y: o.y, width: later.frame.width * zoom, height: later.frame.height * zoom)
+            guard frame.intersects(glow) else { continue }
+            let radius = min(Layout.cardRadius * zoom, frame.width / 2, frame.height / 2)
+            let hole = CGPath(roundedRect: frame, cornerWidth: radius, cornerHeight: radius, transform: nil)
+            visible = (visible ?? CGPath(rect: bounds, transform: nil)).subtracting(hole)
+        }
+        if let visible = visible {
+            let mask = (pulseLayer.mask as? CAShapeLayer) ?? CAShapeLayer()
+            mask.frame = bounds
+            mask.path = visible
+            pulseLayer.mask = mask
+        } else {
+            pulseLayer.mask = nil
+        }
+
+        if pulseLayer.animation(forKey: Self.pulseKey) == nil {
+            // Same range and period as the old per-frame pulse (0.55…1 of full glow, ~4.2 s).
+            let radius = CABasicAnimation(keyPath: "shadowRadius")
+            radius.fromValue = 7.2; radius.toValue = 9
+            let opacity = CABasicAnimation(keyPath: "shadowOpacity")
+            opacity.fromValue = 0.33; opacity.toValue = 0.6
+            let group = CAAnimationGroup()
+            group.animations = [radius, opacity]
+            group.duration = 2.1
+            group.autoreverses = true
+            group.repeatCount = .infinity
+            group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            group.isRemovedOnCompletion = false
+            pulseLayer.add(group, forKey: Self.pulseKey)
+        }
     }
 
     // MARK: Viewport animation (fit / zoom buttons)

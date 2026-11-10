@@ -46,13 +46,22 @@ enum CellFormatter {
     }
 
     static func numberString(_ n: Double, decimals: Int) -> String {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.minimumFractionDigits = decimals
-        f.maximumFractionDigits = decimals
-        f.usesGroupingSeparator = true
+        formatterLock.lock(); defer { formatterLock.unlock() }
+        let f: NumberFormatter
+        if let cached = formatters[decimals] { f = cached } else {
+            f = NumberFormatter()
+            f.numberStyle = .decimal
+            f.minimumFractionDigits = decimals
+            f.maximumFractionDigits = decimals
+            f.usesGroupingSeparator = true
+            formatters[decimals] = f
+        }
         return f.string(from: NSNumber(value: n)) ?? String(n)
     }
+
+    /// One formatter per decimal count; building one per cell showed up in every redraw.
+    private static var formatters: [Int: NumberFormatter] = [:]
+    private static let formatterLock = NSLock()
 
     /// Excel serial date (days since 1899-12-30) → ISO date.
     static func dateString(serial: Double) -> String {

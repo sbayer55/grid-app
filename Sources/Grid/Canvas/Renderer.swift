@@ -6,7 +6,7 @@ struct Renderer {
     let ctx: CGContext
     let theme: Theme
     let zoom: CGFloat
-    /// 0…2π, advanced by the canvas timer; drives the conic border and the selection pulse.
+    /// 0…2π, advanced by the canvas timer; drives the conic border of a selected view card.
     let phase: CGFloat
 
     // MARK: Text
@@ -217,16 +217,8 @@ struct Renderer {
             line(from: CGPoint(x: px, y: colHeaderY), to: CGPoint(x: px, y: rowsTop + rowsHeight), color: theme.accent, width: 2)
         }
 
-        // Current cell ring (pulses)
-        if let s = state.selection, s.cardID == l.card.id, s.anchor.row < l.rows.count, s.anchor.col < sheet.columns.count, state.editing == nil {
-            let cell = CGRect(x: f.minX + l.columnX(s.anchor.col), y: f.minY + l.rowY(s.anchor.row), width: sheet.columns[s.anchor.col].width, height: Layout.rowHeight)
-            let pulse = 0.55 + 0.45 * (sin(phase * 2) + 1) / 2
-            ctx.saveGState()
-            ctx.setShadow(offset: .zero, blur: 10 + 8 * pulse, color: theme.accent.withAlphaComponent(0.6 * pulse).cgColor)
-            ctx.setStrokeColor(theme.accent.cgColor); ctx.setLineWidth(2)
-            ctx.stroke(cell.insetBy(dx: 1, dy: 1))
-            ctx.restoreGState()
-        }
+        // The current-cell ring is a Core Animation layer owned by CanvasView, so its pulse
+        // does not need the card redrawn.
 
         // Footer
         let footerY = rowsTop + rowsHeight

@@ -86,12 +86,90 @@ struct WindowBackground: View {
 struct WindowRing: View {
     let theme: Theme
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: !theme.animateBorders)) { ctx in
-            let angle = theme.animateBorders ? ctx.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 7) / 7 * 360 : 45
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(AngularGradient(colors: theme.borderGradient.map { $0.swiftUI }, center: .center, angle: .degrees(angle)), lineWidth: 2)
+        WindowRingLayer(colors: theme.borderGradient, animated: theme.animateBorders)
+            .ignoresSafeArea()
+    }
+}
+
+private struct WindowRingLayer: NSViewRepresentable {
+    var colors: [NSColor]
+    var animated: Bool
+    func makeNSView(context: Context) -> WindowRingView { WindowRingView() }
+    func updateNSView(_ v: WindowRingView, context: Context) { v.configure(colors: colors, animated: animated) }
+}
+
+/// The window's gradient border. The conic gradient is one layer, spun by a Core Animation
+/// rotation and masked to the ring, so the animation runs in the window server: the app
+/// itself does no per-frame work for it (re-shading the gradient every frame in-process
+/// used to cost most of a CPU core while idle).
+final class WindowRingView: NSView {
+    private let root = CALayer()
+    private let gradient = CAGradientLayer()
+    private let ring = CALayer()
+    private var animated = false
+    private static let spinKey = "spin"
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        gradient.type = .conic
+        gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        ring.cornerRadius = 11
+        ring.cornerCurve = .continuous
+        ring.borderWidth = 2
+        ring.borderColor = NSColor.black.cgColor
+        root.addSublayer(gradient)
+        root.mask = ring
+        layer = root
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isFlipped: Bool { true }   // y down in the hosted layer, so the ring turns clockwise as before
+
+    func configure(colors: [NSColor], animated: Bool) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        gradient.colors = colors.map { $0.cgColor }
+        CATransaction.commit()
+        self.animated = animated
+        updateSpin()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        ring.frame = bounds
+        // A square that still covers the window at any rotation.
+        let side = ceil(hypot(bounds.width, bounds.height))
+        gradient.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+        gradient.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateSpin()   // Core Animation drops animations while a layer is off-screen
+    }
+
+    private func updateSpin() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard animated, window != nil else {
+            gradient.removeAnimation(forKey: Self.spinKey)
+            gradient.setAffineTransform(CGAffineTransform(rotationAngle: .pi / 4))
+            return
         }
-        .ignoresSafeArea()
+        guard gradient.animation(forKey: Self.spinKey) == nil else { return }
+        gradient.setAffineTransform(.identity)
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = 7
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        gradient.add(spin, forKey: Self.spinKey)
     }
 }
 
