@@ -171,7 +171,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         case .columnHeader(let id, let c):
             commitEditing()
             if let l = layouts.first(where: { $0.card.id == id }) {
-                let anchor = toView(CGPoint(x: l.frame.minX + l.columnX(c), y: l.frame.minY + Layout.border + Layout.cardHeader + Layout.rowHeight))
+                let anchor = toView(CGPoint(x: l.frame.minX + l.columnX(c), y: l.frame.minY + l.rowY(0)))
                 state.openColumnMenu(cardID: id, column: c, anchor: anchor)
             }
         case .rowNumber(let id, let r):

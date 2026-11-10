@@ -138,8 +138,9 @@ struct Renderer {
         // Column header row + gutter backgrounds
         let colHeaderY = f.minY + Layout.border + Layout.cardHeader
         let gutterBG = theme.crust.withAlphaComponent(0.55)
-        fill(CGRect(x: f.minX + Layout.border, y: colHeaderY, width: f.width - Layout.border * 2, height: Layout.rowHeight), gutterBG)
-        let rowsTop = colHeaderY + Layout.rowHeight
+        let namesY = colHeaderY + Layout.rowHeight
+        fill(CGRect(x: f.minX + Layout.border, y: colHeaderY, width: f.width - Layout.border * 2, height: Layout.rowHeight * 2), gutterBG)
+        let rowsTop = f.minY + l.rowY(0)
         let rowsHeight = Layout.rowHeight * CGFloat(l.rows.count)
         fill(CGRect(x: f.minX + Layout.border, y: rowsTop, width: Layout.gutter, height: rowsHeight), gutterBG)
 
@@ -165,6 +166,15 @@ struct Renderer {
             if !badge.isEmpty { draw(badge, in: CGRect(x: r.maxX - 40, y: r.minY, width: 36, height: 12), size: 9, weight: .bold, color: theme.accent, align: .right, inset: 2) }
             line(from: CGPoint(x: r.maxX, y: colHeaderY), to: CGPoint(x: r.maxX, y: rowsTop + rowsHeight), color: lineColor)
         }
+
+        // Row 1: column names
+        draw("1", in: CGRect(x: f.minX + Layout.border, y: namesY, width: Layout.gutter, height: Layout.rowHeight), size: 11, color: theme.subtext, align: .right)
+        for (c, col) in sheet.columns.enumerated() {
+            let r = CGRect(x: f.minX + l.columnX(c), y: namesY, width: col.width, height: Layout.rowHeight)
+            let align: NSTextAlignment = col.effectiveAlignment == .left ? .left : (col.effectiveAlignment == .center ? .center : .right)
+            draw(col.name, in: r, size: 12, weight: .bold, color: theme.bright, align: align)
+        }
+        line(from: CGPoint(x: f.minX + Layout.border, y: namesY), to: CGPoint(x: f.maxX - Layout.border, y: namesY), color: lineColor)
 
         // Rows
         for (r, row) in l.rows.enumerated() {

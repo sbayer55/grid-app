@@ -5,6 +5,7 @@ import CoreGraphics
 enum Layout {
     static let cardHeader: CGFloat = 28
     static let rowHeight: CGFloat = 24
+    static let headerRows = 2              // column letters, then row 1 (column names)
     static let gutter: CGFloat = 40        // row-number column
     static let footer: CGFloat = 24        // "+ row · + column" strip
     static let border: CGFloat = 1.5
@@ -17,7 +18,7 @@ enum Layout {
     static func gridSize(sheet: Sheet, workbook: Workbook) -> CGSize {
         let w = gutter + sheet.columns.reduce(0) { $0 + $1.width } + border * 2
         let rows = workbook.visibleRows(of: sheet).count
-        let h = cardHeader + rowHeight * CGFloat(rows + 1) + footer + border * 2
+        let h = cardHeader + rowHeight * CGFloat(rows + headerRows) + footer + border * 2
         return CGSize(width: w, height: h)
     }
 
@@ -46,8 +47,8 @@ enum Layout {
             guard let s = sheet else { return 0 }
             return Layout.border + Layout.gutter + s.columns.prefix(c).reduce(0) { $0 + $1.width }
         }
-        /// y offset of display row `r` (0 = first data row; -1 = column header row).
-        func rowY(_ r: Int) -> CGFloat { Layout.border + Layout.cardHeader + Layout.rowHeight * CGFloat(r + 1) }
+        /// y offset of display row `r` (0 = first data row; -1 = column names, -2 = column letters).
+        func rowY(_ r: Int) -> CGFloat { Layout.border + Layout.cardHeader + Layout.rowHeight * CGFloat(r + Layout.headerRows) }
     }
 
     static func layouts(canvas: Canvas, workbook: Workbook) -> [CardLayout] {
@@ -96,7 +97,7 @@ enum Layout {
                 return .cardHeader(l.card.id)
             }
             guard let sheet = l.sheet, l.card.kind.isGrid else { return .cardBody(l.card.id) }
-            let rowBand = Int(floor((local.y - border - cardHeader) / rowHeight)) - 1   // -1 = column header row
+            let rowBand = Int(floor((local.y - border - cardHeader) / rowHeight)) - headerRows   // < 0 = column letters / names
             if rowBand >= l.rows.count {
                 return local.x < border + gutter + 80 ? .addRow(l.card.id) : .addColumn(l.card.id)
             }
