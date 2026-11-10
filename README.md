@@ -16,6 +16,7 @@ swift run Grid         # run from the package (window appears, no .app bundle)
 swift test             # formula engine, pivot/chart, xlsx round-trip
 make app               # release build → build/Grid.app (ad-hoc signed)
 make dmg               # build/Grid-<version>.dmg with an /Applications shortcut
+make icon              # redraw Resources/AppIcon.icns from Scripts/make-icon.swift
 ```
 
 Or open the package in Xcode: `xed .` — the `Grid` scheme runs the app directly.
