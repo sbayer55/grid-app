@@ -138,3 +138,30 @@ final class XLSXTests: XCTestCase {
         XCTAssertEqual(back.canvases.count, 4)   // one per sheet, including the generated pivot sheet
     }
 }
+
+final class LayoutTests: XCTestCase {
+    /// Grid cards have two header rows (column letters, then row 1 with the column names) above the data.
+    func testGridHitTesting() throws {
+        let wb = SampleData.workbook()
+        let canvas = try XCTUnwrap(wb.canvases.first)
+        let layouts = Layout.layouts(canvas: canvas, workbook: wb)
+        let l = try XCTUnwrap(layouts.first { $0.card.kind.isGrid })
+        let id = l.card.id
+        let x1 = l.frame.minX + l.columnX(1) + 5                       // inside column B
+        let gutterX = l.frame.minX + Layout.border + 5
+        func y(_ row: Int) -> CGFloat { l.frame.minY + l.rowY(row) + Layout.rowHeight / 2 }
+        func hit(_ x: CGFloat, _ y: CGFloat) -> Layout.Hit { Layout.hit(CGPoint(x: x, y: y), layouts: [l]) }
+
+        if case .columnHeader(id, 1) = hit(x1, y(-2)) {} else { XCTFail("letters row should hit the column header") }
+        if case .columnHeader(id, 1) = hit(x1, y(-1)) {} else { XCTFail("names row should hit the column header") }
+        if case .cell(id, row: 0, col: 1) = hit(x1, y(0)) {} else { XCTFail("first data row should hit cell 0") }
+        if case .cell(id, row: 3, col: 1) = hit(x1, y(3)) {} else { XCTFail("fourth data row should hit cell 3") }
+        if case .rowNumber(id, 0) = hit(gutterX, y(0)) {} else { XCTFail("gutter should hit row number 0") }
+        if case .cardBody = hit(gutterX, y(-1)) {} else { XCTFail("gutter beside the names row is not a row number") }
+        let last = l.rows.count - 1
+        if case .cell(id, row: last, col: 1) = hit(x1, y(last)) {} else { XCTFail("last data row should hit its cell") }
+        if case .addRow = hit(l.frame.minX + Layout.border + Layout.gutter + 10, y(last + 1)) {} else { XCTFail("footer left should hit add row") }
+        if case .addColumn = hit(l.frame.maxX - 20, y(last + 1)) {} else { XCTFail("footer right should hit add column") }
+        XCTAssertEqual(l.frame.height, Layout.cardHeader + Layout.rowHeight * CGFloat(l.rows.count + 2) + Layout.footer + Layout.border * 2)
+    }
+}
