@@ -44,6 +44,11 @@ extension AppState {
             add("sheet", "append row", "⌘⇧↩") { self.appendRow() }
             add("sheet", "append column") { self.appendColumn() }
         }
+        if canCopy {
+            add("sheet", "copy selection", "⌘C") { self.copySelection() }
+            add("sheet", "cut selection", "⌘X") { self.cutSelection() }
+            add("sheet", "paste", "⌘V") { self.paste() }
+        }
         add("view", "insert pivot from selection", "⌘⇧P") { self.insertView("pivot") }
         add("view", "insert chart from selection", "⌘⇧C") { self.insertView("chart") }
         if let id = selectedCardID {
